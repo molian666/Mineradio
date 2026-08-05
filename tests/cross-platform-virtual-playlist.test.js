@@ -249,7 +249,7 @@ test('uses the persisted snapshot before merged detail and queue source requests
   assert.match(panelShell, /scheduleMergedPlaylistCacheSync\(/);
 });
 
-test('uses source update metadata when track counts stay unchanged', async () => {
+test('keeps cached tracks when only source metadata changes (track counts unchanged)', async () => {
   const core = loadCore();
   const stored = new Map();
   const adapter = core.createMergedPlaylistCacheAdapter({
@@ -266,11 +266,69 @@ test('uses source update metadata when track counts stay unchanged', async () =>
   };
   await core.syncMergedPlaylistCache(firstRows, 'account-versions', { adapter, fetchPage });
   calls.length = 0;
+  // 平台 updatedAt 抖动（v1 → v2）但 trackCount 未变：不应全量重拉，
+  // 否则每次打开合并歌单都会因元数据字段变化重新拉取（歌曲数量不稳定）。
   const changedRows = [Object.assign(source('netease', 'n-1', 'Netease', 1), { updatedAt: 'v2' })];
+  const result = await core.syncMergedPlaylistCache(changedRows, 'account-versions', { adapter, fetchPage });
+  assert.equal(result.changed, false);
+  assert.deepEqual(calls, []);
+  assert.equal(result.snapshot.tracks[0].id, 'v1');
+});
+
+test('refetches a source when track count changes even if only metadata changed', async () => {
+  const core = loadCore();
+  const stored = new Map();
+  const adapter = core.createMergedPlaylistCacheAdapter({
+    async get(key) { return stored.get(key) || null; },
+    async set(key, value) { stored.set(key, value); },
+    async delete(key) { stored.delete(key); },
+  });
+  const calls = [];
+  const fetchPage = async (row) => {
+    calls.push(row.updatedAt || 'none');
+    return { tracks: [{ provider: row.provider, id: row.updatedAt, name: row.updatedAt, artist: 'Artist' }], nextOffset: 1, hasMore: false };
+  };
+  await core.syncMergedPlaylistCache([Object.assign(source('netease', 'n-1', 'Netease', 1), { updatedAt: 'v1' })], 'account-versions', { adapter, fetchPage });
+  calls.length = 0;
+  // trackCount 1 → 3：即使签名/元数据也变化，也必须重拉
+  const changedRows = [Object.assign(source('netease', 'n-1', 'Netease', 3), { updatedAt: 'v2' })];
   const result = await core.syncMergedPlaylistCache(changedRows, 'account-versions', { adapter, fetchPage });
   assert.equal(result.changed, true);
   assert.deepEqual(calls, ['v2']);
   assert.equal(result.snapshot.tracks[0].id, 'v2');
+});
+
+test('refetches a source when the cache is older than the stale window', async () => {
+  const core = loadCore();
+  const stored = new Map();
+  const adapter = core.createMergedPlaylistCacheAdapter({
+    async get(key) { return stored.get(key) || null; },
+    async set(key, value) { stored.set(key, value); },
+    async delete(key) { stored.delete(key); },
+  });
+  const calls = [];
+  const fetchPage = async (row) => {
+    calls.push(row.updatedAt || 'none');
+    return { tracks: [{ provider: row.provider, id: row.updatedAt, name: row.updatedAt, artist: 'Artist' }], nextOffset: 1, hasMore: false };
+  };
+  // 构造一个超过默认 6h stale 窗口的旧缓存快照（签名 v1、trackCount 1）
+  const oldSnapshot = {
+    version: 1,
+    accountKey: 'account-versions',
+    sources: [Object.assign(source('netease', 'n-1', 'Netease', 1), { updatedAt: 'v1', tracks: [{ provider: 'netease', id: 'v1', name: 'v1', artist: 'Artist' }] })],
+    tracks: [{ provider: 'netease', id: 'v1', name: 'v1', artist: 'Artist' }],
+    total: 1,
+    partial: false,
+    errors: [],
+    savedAt: Date.now() - 7 * 60 * 60 * 1000,
+  };
+  // 签名变化且缓存已过期 → 允许重拉
+  const changedRows = [Object.assign(source('netease', 'n-1', 'Netease', 1), { updatedAt: 'v2' })];
+  const result = await core.syncMergedPlaylistCache(changedRows, 'account-versions', {
+    adapter, previousSnapshot: oldSnapshot, fetchPage,
+  });
+  assert.equal(result.changed, true);
+  assert.deepEqual(calls, ['v2']);
 });
 
 test('reuses the persisted full account key while login state is still restoring', () => {

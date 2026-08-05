@@ -143,8 +143,11 @@ async function prepareMergedPlaylistCache(record, options) {
       // 翻页完成后再后台同步，避免与目录加载抢带宽。
       var shouldBackgroundSync = options.preferCache !== false
         && (!!previous.partial || (typeof playlistCatalogHasPendingPages === 'function' && !playlistCatalogHasPendingPages()));
+      // partial（部分平台上次拉取失败）立即后台补全；完整缓存则延迟到
+      // 空闲窗口再后台同步，避免与用户打开歌单的缓存渲染并行抢带宽
+      // （表现为第二次打开和第一次一样慢）。
       if (shouldBackgroundSync) {
-        scheduleMergedPlaylistCacheSync('cached-playlist-background-sync');
+        scheduleMergedPlaylistCacheSync('cached-playlist-background-sync', previous.partial ? 0 : 10000);
       }
       return { snapshot: previous, changed: false, partial: !!previous.partial, errors: previous.errors || [], cached: true, stale: true };
     }
@@ -174,7 +177,8 @@ async function prepareMergedPlaylistCache(record, options) {
   }
   return op;
 }
-function scheduleMergedPlaylistCacheSync(reason) {
+var mergedPlaylistSyncDelayTimer = 0;
+function scheduleMergedPlaylistCacheSync(reason, delayMs) {
   if (!(fx && fx.shelfMergeCollections)) return Promise.resolve(null);
   var record = mergedPlaylistRecordForId(MERGED_PLAYLIST_ID);
   if (!record || !record.sources || !record.sources.length) return Promise.resolve(null);
@@ -187,6 +191,17 @@ function scheduleMergedPlaylistCacheSync(reason) {
   // 合并歌单时再同步——避免应用启动时叠加全量网络拉取导致"歌单加载"
   // 长时间无反馈，也避免后台同步与应用关闭交错导致缓存未保存完。
   if (!mergedPlaylistCacheRuntime.snapshot) return Promise.resolve(null);
+  // delayMs > 0 时延迟执行：合并窗口内重复调度只保留最后一次，
+  // 避免用户连续打开/切换歌单时叠加多次后台同步。
+  if (delayMs > 0) {
+    if (mergedPlaylistSyncDelayTimer) clearTimeout(mergedPlaylistSyncDelayTimer);
+    return new Promise(function (resolve) {
+      mergedPlaylistSyncDelayTimer = setTimeout(function () {
+        mergedPlaylistSyncDelayTimer = 0;
+        resolve(scheduleMergedPlaylistCacheSync(reason, 0));
+      }, delayMs);
+    });
+  }
   mergedPlaylistCacheRuntime.promise = prepareMergedPlaylistCache(record, { reason: reason || 'catalog-refresh', forceSync: true }).catch(function (error) {
     console.warn('[MergedPlaylistCache]', reason || '', error);
     return { snapshot: mergedPlaylistCacheRuntime.snapshot, changed: false, partial: true, errors: [{ error: error && error.message || String(error) }] };

@@ -255,12 +255,26 @@ async function syncMergedPlaylistCache(sourceRows, accountKey, options) {
     // 与 mergedSourceRecord 保存签名的方式对称：源自带 signature 优先，
     // 否则重建。保证缓存恢复后的比较结果与保存时完全一致。
     var currentSignature = source.signature || mergedSourceSignature(source);
-    if (!old || old.signature !== currentSignature) return true;
-    // 上次同步该源失败（partial），本次重试拉取，避免不完整的缓存
-    // 因签名未变而永远停留在缺失状态（新收藏的歌曲永远进不来）。
-    return (previous && previous.errors || []).some(function (error) {
-      return mergedSourceKey(error) === mergedSourceKey(source);
-    });
+    if (!old) return true;
+    if (old.signature === currentSignature) {
+      // 签名未变：仅当上次同步该源失败（partial）时重试拉取，避免不完整
+      // 的缓存因签名未变而永远停留在缺失状态（新收藏的歌曲永远进不来）。
+      return (previous && previous.errors || []).some(function (error) {
+        return mergedSourceKey(error) === mergedSourceKey(source);
+      });
+    }
+    // 签名变化：不直接全量重拉。部分平台的 updatedAt/etag/revision 等
+    // 元数据字段每次请求都会变化，若签名一变就重拉，会导致每次打开合并
+    // 歌单都重新拉取全部源（表现为歌曲数量每次都不稳定）。
+    // 仅在 trackCount 变化，或缓存超过最大寿命（默认 6 小时）时才重拉；
+    // 其余情况沿用旧曲目并更新签名，避免元数据抖动触发全量重拉。
+    var oldCount = Math.max(0, Number(old.trackCount) || 0);
+    var newCount = Math.max(0, Number(source.trackCount) || 0);
+    if (newCount !== oldCount) return true;
+    var staleAfterMs = Math.max(0, Number(options.staleAfterMs) || 0) || 6 * 60 * 60 * 1000;
+    var savedAt = Number(previous && previous.savedAt) || 0;
+    if (!savedAt || Date.now() - savedAt > staleAfterMs) return true;
+    return false;
   });
   var structureChanged = !previous || rows.length !== previous.sources.length || (previous.sources || []).some(function (source) { return !currentKeys[mergedSourceKey(source)]; });
   var changed = structureChanged || changedRows.length > 0;
@@ -334,9 +348,16 @@ async function loadMergedPlaylistCache(accountKey, adapter) {
     var snapshot = adapter && typeof adapter.load === 'function' ? await adapter.load(key) : null;
     if (!snapshot) {
       var rememberedKey = readMergedPlaylistAccountKey();
-      if (rememberedKey && rememberedKey !== String(accountKey || 'anonymous') && mergedPlaylistAccountKeysCompatible(accountKey, rememberedKey)) {
-        snapshot = await adapter.load(mergedPlaylistCacheKey(rememberedKey));
-        if (snapshot) console.log('[MergedPlaylistCache] load compat-key', key, '<-', rememberedKey, snapshot.tracks.length + ' tracks');
+      if (rememberedKey && rememberedKey !== String(accountKey || 'anonymous')) {
+        // anonymous 时也允许用记住的 key 兜底读取：启动早期登录态尚未
+        // 恢复时 accountKey 可能是 anonymous，若不兜底则缓存永远 MISS。
+        var compatible = String(accountKey || 'anonymous') === 'anonymous'
+          ? true
+          : mergedPlaylistAccountKeysCompatible(accountKey, rememberedKey);
+        if (compatible) {
+          snapshot = await adapter.load(mergedPlaylistCacheKey(rememberedKey));
+          if (snapshot) console.log('[MergedPlaylistCache] load compat-key', key, '<-', rememberedKey, snapshot.tracks.length + ' tracks');
+        }
       }
     }
     if (snapshot) {
@@ -406,7 +427,16 @@ function currentMergedPlaylistAccountKey() {
     return item[0] + ':' + String(identity);
   });
   var currentKey = parts.length ? parts.join('|') : 'anonymous';
-  if (currentKey === 'anonymous') return currentKey;
+  if (currentKey === 'anonymous') {
+    // 登录态可能尚未恢复完成（启动早期 refreshUserPlaylists 触发缓存恢复
+    // 时各平台 loginStatus 还没就绪）。此时用上次记住的账号 key 兜底，
+    // 保证合并歌单缓存能命中，而不是退回 anonymous 导致缓存 MISS 后全量
+    // 重新拉取。游客（所有平台均未登录）时合并歌单不会展示，不存在串
+    // 缓存风险。
+    var rememberedKey = readMergedPlaylistAccountKey();
+    if (rememberedKey) return rememberedKey;
+    return currentKey;
+  }
   var rememberedKey = readMergedPlaylistAccountKey();
   if (rememberedKey && rememberedKey !== currentKey && mergedPlaylistAccountKeyIsSubset(currentKey, rememberedKey)) return rememberedKey;
   if (rememberedKey && rememberedKey !== currentKey && mergedPlaylistAccountKeyIsSubset(rememberedKey, currentKey)) return currentKey;
