@@ -86,6 +86,15 @@
     FileWrite $0 "appId=${MINERADIO_MARKER_APP_ID}$\r$\n"
     FileClose $0
   ${EndIf}
+  # 预读主程序文件，触发杀软（Defender 等）对"新写入可执行文件"的首次
+  # 扫描，与完成页展示并行完成；否则用户点击"完成"启动应用时 CreateProcess
+  # 会被首次执行扫描阻塞数秒，表现为安装器窗口点击完成后卡住。
+  ClearErrors
+  FileOpen $1 "$INSTDIR\${PRODUCT_FILENAME}.exe" r
+  ${IfNot} ${Errors}
+    FileRead $1 $4 4096
+    FileClose $1
+  ${EndIf}
 !macroend
 
 !macro customRemoveFiles
@@ -112,7 +121,11 @@
       ${Else}
         StrCpy $1 ""
       ${EndIf}
-      ${StdUtils.ExecShellAsUser} $0 "$launchLink" "open" "$1"
+      # 用 Exec（异步）替代 StdUtils.ExecShellAsUser：点击"完成"后安装器
+      # 立即关闭窗口，应用在后台启动。ExecShellAsUser 在部分系统上会同步
+      # 等待用户会话 token / ShellExecute 返回，导致安装器窗口点击完成后
+      # 卡住十几秒才消失。
+      Exec '"$INSTDIR\${PRODUCT_FILENAME}.exe" $1'
     FunctionEnd
 
     !define MUI_FINISHPAGE_RUN
