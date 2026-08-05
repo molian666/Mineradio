@@ -92,6 +92,45 @@ function makeFetchCounter() {
 
 const accountKey = 'netease:netease-user|qq:qq-user';
 
+test('合并歌单缓存：本地文件 adapter 通过桥接读写删', async () => {
+  const M = loadCore();
+  const store = new Map();
+  const bridge = {
+    async read(key) {
+      return store.has(key)
+        ? { ok: true, hit: true, value: JSON.parse(JSON.stringify(store.get(key))) }
+        : { ok: true, hit: false };
+    },
+    async write(key, value) { store.set(key, JSON.parse(JSON.stringify(value))); return { ok: true }; },
+    async remove(key) { store.delete(key); return { ok: true }; },
+  };
+  const adapter = M.createMergedPlaylistFileAdapter(bridge);
+  assert.ok(adapter, '文件 adapter 可创建');
+  const snapshot = {
+    version: 1, accountKey: 'k', sources: [],
+    tracks: [{ provider: 'netease', id: 'x', name: 'X', artist: 'A' }],
+    total: 1, partial: false, errors: [], savedAt: Date.now(),
+  };
+  assert.equal(await adapter.save('merged:k', snapshot), true);
+  const loaded = await adapter.load('merged:k');
+  assert.ok(loaded && loaded.tracks.length === 1 && loaded.tracks[0].id === 'x', '读写往返一致');
+  assert.equal(await adapter.load('merged:missing'), null, 'miss 返回 null');
+  assert.equal(await adapter.remove('merged:k'), true);
+  assert.equal(await adapter.load('merged:k'), null, '删除后 miss');
+  // 桥接读失败时 load 容错返回 null；桥接写抛错时 save 向上抛（由调用方 catch）
+  const badBridge = { read: async () => { throw new Error('boom'); }, write: async () => { throw new Error('boom'); }, remove: async () => ({ ok: false }) };
+  const badAdapter = M.createMergedPlaylistFileAdapter(badBridge);
+  assert.equal(await badAdapter.load('merged:k'), null);
+  await assert.rejects(() => badAdapter.save('merged:k', snapshot));
+});
+
+test('合并歌单缓存：无桥接时回退 IndexedDB adapter', () => {
+  const M = loadCore();
+  M.mergedPlaylistCacheRuntime.adapter = null;
+  const adapter = M.getMergedPlaylistCacheAdapter();
+  assert.ok(adapter && typeof adapter.load === 'function' && typeof adapter.save === 'function', '默认 adapter 可用');
+});
+
 test('合并歌单缓存：首次全量同步落缓存，未变化不重拉，命中缓存快速开始加载', async () => {
   const M = loadCore();
   const storage = memoryAdapter();

@@ -139,6 +139,11 @@ contextBridge.exposeInMainWorld('desktopWindow', {
     ipcRenderer.on('desktop-window-state', listener);
     return () => ipcRenderer.removeListener('desktop-window-state', listener);
   },
+  mergedCache: {
+    read: (key) => ipcRenderer.invoke('mineradio-merged-cache-read', String(key || '')),
+    write: (key, value) => ipcRenderer.invoke('mineradio-merged-cache-write', String(key || ''), value || {}),
+    remove: (key) => ipcRenderer.invoke('mineradio-merged-cache-delete', String(key || '')),
+  },
 });
 
 contextBridge.exposeInMainWorld('mineradioUserApi', { addSource: (sourceText, metadata) => ipcRenderer.invoke('mineradio-lx-user-api-add', sourceText, metadata || {}), pickSourceFile: () => ipcRenderer.invoke('mineradio-lx-user-api-pick-file'), importSourceUrl: (url) => ipcRenderer.invoke('mineradio-lx-user-api-import-url', String(url || '')), activateSource: (sourceId) => ipcRenderer.invoke('mineradio-lx-user-api-activate', String(sourceId || '')), removeSource: (sourceId) => ipcRenderer.invoke('mineradio-lx-user-api-remove', String(sourceId || '')), resolveSongUrl: (song, quality, options) => ipcRenderer.invoke('mineradio-lx-user-api-resolve-song-url', song || {}, String(quality || 'standard'), options || {}), getState: () => ipcRenderer.invoke('mineradio-lx-user-api-state'), getAvailableLxProviders: () => ipcRenderer.invoke('mineradio-lx-user-api-providers') });

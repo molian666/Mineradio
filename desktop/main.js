@@ -4529,6 +4529,54 @@ ipcMain.handle('mineradio-cache-write-lyric', async (_event, key, payload) => {
   }
 });
 
+// ---- Merged playlist cache（本地文件化，替代渲染进程 IndexedDB）----
+// 打开合并歌单时纯本地读取，不依赖登录态时序与 IndexedDB 可用性，
+// 避免每次打开都触发全量网络拉取。按 accountKey 哈希分文件，原子写入。
+const MERGED_PLAYLIST_CACHE_DIR = 'merged-playlist-cache';
+const MERGED_PLAYLIST_CACHE_ENTRY_MAX_BYTES = 64 * 1024 * 1024;
+function mergedPlaylistCacheFilePath(key) {
+  const digest = crypto.createHash('sha256').update(String(key || 'anonymous')).digest('hex');
+  return path.join(app.getPath('userData'), MERGED_PLAYLIST_CACHE_DIR, `${digest}.json`);
+}
+ipcMain.handle('mineradio-merged-cache-read', async (_event, key) => {
+  try {
+    const file = mergedPlaylistCacheFilePath(key);
+    if (!fs.existsSync(file)) return { ok: true, hit: false };
+    const stat = await fs.promises.stat(file);
+    if (!stat || stat.size <= 0 || stat.size > MERGED_PLAYLIST_CACHE_ENTRY_MAX_BYTES) return { ok: true, hit: false };
+    const value = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: true, hit: false };
+    return { ok: true, hit: true, value };
+  } catch (error) {
+    return { ok: false, hit: false, error: error.message || 'MERGED_CACHE_READ_FAILED' };
+  }
+});
+ipcMain.handle('mineradio-merged-cache-write', async (_event, key, value) => {
+  try {
+    if (!key || !value || typeof value !== 'object' || Array.isArray(value)) return { ok: false, error: 'INVALID_MERGED_CACHE_VALUE' };
+    const text = JSON.stringify(value);
+    if (Buffer.byteLength(text, 'utf8') > MERGED_PLAYLIST_CACHE_ENTRY_MAX_BYTES) return { ok: false, error: 'MERGED_CACHE_ENTRY_TOO_LARGE' };
+    const dir = path.join(app.getPath('userData'), MERGED_PLAYLIST_CACHE_DIR);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const file = mergedPlaylistCacheFilePath(key);
+    const temporary = `${file}.tmp`;
+    await fs.promises.writeFile(temporary, text, 'utf8');
+    await fs.promises.rename(temporary, file);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || 'MERGED_CACHE_WRITE_FAILED' };
+  }
+});
+ipcMain.handle('mineradio-merged-cache-delete', async (_event, key) => {
+  try {
+    const file = mergedPlaylistCacheFilePath(key);
+    if (fs.existsSync(file)) await fs.promises.unlink(file);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message || 'MERGED_CACHE_DELETE_FAILED' };
+  }
+});
+
 ipcMain.handle('desktop-window-close', (event, behavior) => {
   const win = getSenderWindow(event);
   const requestedBehavior = behavior ? normalizeCloseBehavior(behavior) : closeBehavior;

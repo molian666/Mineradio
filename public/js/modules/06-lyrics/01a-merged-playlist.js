@@ -155,8 +155,41 @@ function createMergedPlaylistIndexedDbAdapter() {
   });
 }
 
+function mergedPlaylistFileBridge() {
+  if (typeof window === 'undefined' || !window.desktopWindow || !window.desktopWindow.mergedCache) return null;
+  return window.desktopWindow.mergedCache;
+}
+
+function createMergedPlaylistFileAdapter(bridge) {
+  bridge = bridge || mergedPlaylistFileBridge();
+  if (!bridge || typeof bridge.read !== 'function') return null;
+  return createMergedPlaylistCacheAdapter({
+    async get(key) {
+      try {
+        var result = await bridge.read(key);
+        return result && result.ok && result.hit ? result.value : null;
+      } catch (e) { return null; }
+    },
+    async set(key, value) {
+      var result = await bridge.write(key, value);
+      if (!result || !result.ok) throw new Error('MERGED_CACHE_WRITE_FAILED');
+      return true;
+    },
+    async delete(key) {
+      var result = await bridge.remove(key);
+      if (!result || !result.ok) throw new Error('MERGED_CACHE_DELETE_FAILED');
+      return true;
+    },
+  });
+}
+
 function getMergedPlaylistCacheAdapter() {
-  if (!mergedPlaylistCacheRuntime.adapter) mergedPlaylistCacheRuntime.adapter = createMergedPlaylistIndexedDbAdapter();
+  if (!mergedPlaylistCacheRuntime.adapter) {
+    // 本地文件缓存优先：打开合并歌单时纯本地读取，不依赖登录态时序与
+    // IndexedDB 可用性，避免每次打开都因缓存 miss 触发全量网络拉取。
+    // 非 Electron 环境或桥接不可用时回退 IndexedDB。
+    mergedPlaylistCacheRuntime.adapter = createMergedPlaylistFileAdapter() || createMergedPlaylistIndexedDbAdapter();
+  }
   return mergedPlaylistCacheRuntime.adapter;
 }
 
