@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld('desktopWindow', {
   getCacheSettings: () => ipcRenderer.invoke('mineradio-cache-get-settings'),
   chooseCacheDirectory: () => ipcRenderer.invoke('mineradio-cache-choose-directory'),
   setCacheSettings: (payload) => ipcRenderer.invoke('mineradio-cache-set-settings', payload || {}),
+  getDownloadSettings: () => ipcRenderer.invoke('mineradio-download-get-settings'),
+  chooseDownloadDirectory: () => ipcRenderer.invoke('mineradio-download-choose-directory'),
+  setDownloadDirectory: (downloadPath) => ipcRenderer.invoke('mineradio-download-set-directory', { path: String(downloadPath || '') }),
+  downloadSong: (payload) => ipcRenderer.invoke('mineradio-download-song', payload || {}),
   listWallpaperEngineProjects: (payload) => ipcRenderer.invoke('mineradio-wallpaper-engine-list', payload || {}),
   getWallpaperEngineProjectDetails: (id) => ipcRenderer.invoke('mineradio-wallpaper-engine-project-details', String(id || '')),
   openWallpaperEngineProjectDetails: (id, target) => ipcRenderer.invoke('mineradio-wallpaper-engine-open-project-details', {
@@ -136,6 +140,8 @@ contextBridge.exposeInMainWorld('desktopWindow', {
     return () => ipcRenderer.removeListener('desktop-window-state', listener);
   },
 });
+
+contextBridge.exposeInMainWorld('mineradioUserApi', { addSource: (sourceText, metadata) => ipcRenderer.invoke('mineradio-lx-user-api-add', sourceText, metadata || {}), pickSourceFile: () => ipcRenderer.invoke('mineradio-lx-user-api-pick-file'), importSourceUrl: (url) => ipcRenderer.invoke('mineradio-lx-user-api-import-url', String(url || '')), activateSource: (sourceId) => ipcRenderer.invoke('mineradio-lx-user-api-activate', String(sourceId || '')), removeSource: (sourceId) => ipcRenderer.invoke('mineradio-lx-user-api-remove', String(sourceId || '')), resolveSongUrl: (song, quality, options) => ipcRenderer.invoke('mineradio-lx-user-api-resolve-song-url', song || {}, String(quality || 'standard'), options || {}), getState: () => ipcRenderer.invoke('mineradio-lx-user-api-state'), getAvailableLxProviders: () => ipcRenderer.invoke('mineradio-lx-user-api-providers') });
 
 window.addEventListener('DOMContentLoaded', () => {
   document.documentElement.classList.add('desktop-shell-root');

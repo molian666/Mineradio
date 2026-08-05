@@ -90,6 +90,7 @@ async function loadPodcastRadioIntoQueue(id, autoplay, title) {
 }
 function playlistQueueSource(id) {
   var raw = String(id || '');
+  if (raw.indexOf('merged:') === 0) return { provider: MERGED_PLAYLIST_PROVIDER, id: raw.slice(7), requestId: raw };
   if (raw.indexOf('qq:') === 0) return { provider: 'qq', id: raw.slice(3), requestId: raw };
   if (raw.indexOf('kugou:') === 0) return { provider: 'kugou', id: raw.slice(6), requestId: raw };
   if (raw.indexOf('qishui:') === 0) return { provider: 'qishui', id: raw.slice(7), requestId: raw };
@@ -97,6 +98,7 @@ function playlistQueueSource(id) {
   return { provider: 'netease', id: raw, requestId: raw };
 }
 function playlistQueuePageSize(provider, initial) {
+  if (provider === MERGED_PLAYLIST_PROVIDER) return initial ? PLAYLIST_QUEUE_INITIAL_BATCH_SIZE : PLAYLIST_QUEUE_BACKGROUND_BATCH_SIZE;
   if (initial) return provider === 'kugou' || provider === 'qishui' ? 50 : (provider === 'spotify' ? 96 : PLAYLIST_QUEUE_INITIAL_BATCH_SIZE);
   if (provider === 'kugou' || provider === 'qishui') return 50;
   if (provider === 'spotify') return 100;
@@ -104,7 +106,147 @@ function playlistQueuePageSize(provider, initial) {
   return PLAYLIST_QUEUE_BACKGROUND_BATCH_SIZE;
 }
 function playlistQueuePageUrl(source, offset, limit) {
+  if (source && source.provider === MERGED_PLAYLIST_PROVIDER) return '';
   return playlistTracksEndpoint(source.provider, source.id, { offset: Math.max(0, offset || 0), limit: Math.max(1, limit || PLAYLIST_QUEUE_INITIAL_BATCH_SIZE) });
+}
+function mergedPlaylistRecordForId(id) {
+  var key = String(id || '');
+  return (userPlaylists || []).find(function (playlist) {
+    return playlist && playlist.provider === MERGED_PLAYLIST_PROVIDER && String(playlist.id || '') === key;
+  }) || null;
+}
+function mergedPlaylistSourcePage(source, offset, limit, signal) {
+  var requestOptions = signal ? { signal: signal } : { timeoutMs: 16000 };
+  return apiJson(playlistTracksEndpoint(source.provider, source.id, { offset: offset, limit: limit }), requestOptions);
+}
+async function prepareMergedPlaylistCache(record, options) {
+  options = options || {};
+  record = record || {};
+  if (record.provider !== MERGED_PLAYLIST_PROVIDER) return null;
+  var accountKey = options.accountKey || currentMergedPlaylistAccountKey();
+  var forceSync = !!options.forceSync;
+  var adapter = options.adapter || getMergedPlaylistCacheAdapter();
+  // 非强制同步的 prepare 操作防重入：详情面板与播放入口并发打开合并歌单
+  // 时共享同一次缓存读取/同步，避免触发两次全量拉取（表现为每次打开都像
+  // 首次加载一样慢）。
+  if (!forceSync && mergedPlaylistCacheRuntime.preparePromise) return mergedPlaylistCacheRuntime.preparePromise;
+  var op = (async function () {
+    var previous = mergedPlaylistCacheRuntime.accountKey === String(accountKey || 'anonymous')
+      ? mergedPlaylistCacheRuntime.snapshot
+      : null;
+    if (!previous) previous = await loadMergedPlaylistCache(accountKey, adapter);
+    if (previous && !forceSync) {
+      mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
+      mergedPlaylistCacheRuntime.snapshot = previous;
+      console.log('[MergedPlaylistCache] cache-hit', accountKey, 'tracks=', (previous.tracks || []).length, 'partial=', !!previous.partial);
+      // partial（部分平台上次拉取失败）时立即后台重试补全；否则等目录
+      // 翻页完成后再后台同步，避免与目录加载抢带宽。
+      var shouldBackgroundSync = options.preferCache !== false
+        && (!!previous.partial || (typeof playlistCatalogHasPendingPages === 'function' && !playlistCatalogHasPendingPages()));
+      if (shouldBackgroundSync) {
+        scheduleMergedPlaylistCacheSync('cached-playlist-background-sync');
+      }
+      return { snapshot: previous, changed: false, partial: !!previous.partial, errors: previous.errors || [], cached: true, stale: true };
+    }
+    // 后台强制同步（scheduleMergedPlaylistCacheSync）进行中且本地无缓存时，
+    // 复用该同步结果，避免再起一次全量拉取。
+    if (!previous && !forceSync && mergedPlaylistCacheRuntime.promise) return mergedPlaylistCacheRuntime.promise;
+    console.log('[MergedPlaylistCache] cache-miss -> full sync', accountKey, 'sources=', (record.sources || []).length, 'forceSync=', forceSync);
+    var result = await syncMergedPlaylistCache(record.sources || [], accountKey, {
+      adapter: adapter,
+      previousSnapshot: previous,
+      pageSize: options.pageSize || 100,
+      fetchPage: function (source, offset, limit) {
+        return mergedPlaylistSourcePage(source, offset, limit, options.signal);
+      },
+    });
+    if (result && result.snapshot) {
+      mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
+      mergedPlaylistCacheRuntime.snapshot = result.snapshot;
+    }
+    return result;
+  })();
+  if (!forceSync) {
+    mergedPlaylistCacheRuntime.preparePromise = op;
+    op.finally(function () {
+      if (mergedPlaylistCacheRuntime.preparePromise === op) mergedPlaylistCacheRuntime.preparePromise = null;
+    }).catch(function () { });
+  }
+  return op;
+}
+function scheduleMergedPlaylistCacheSync(reason) {
+  if (!(fx && fx.shelfMergeCollections)) return Promise.resolve(null);
+  var record = mergedPlaylistRecordForId(MERGED_PLAYLIST_ID);
+  if (!record || !record.sources || !record.sources.length) return Promise.resolve(null);
+  if (mergedPlaylistCacheRuntime.promise) return mergedPlaylistCacheRuntime.promise;
+  // 用户的 prepare 正在进行（首次打开合并歌单全量同步中）：复用其结果，
+  // 避免后台同步再并发触发一次全量拉取。
+  if (mergedPlaylistCacheRuntime.preparePromise) return mergedPlaylistCacheRuntime.preparePromise;
+  // 启动/目录刷新触发的后台同步仅在已有缓存时执行（刷新签名判断）。
+  // 无缓存（首次使用）时不自动全量拉取所有源歌单曲目，等用户真正打开
+  // 合并歌单时再同步——避免应用启动时叠加全量网络拉取导致"歌单加载"
+  // 长时间无反馈，也避免后台同步与应用关闭交错导致缓存未保存完。
+  if (!mergedPlaylistCacheRuntime.snapshot) return Promise.resolve(null);
+  mergedPlaylistCacheRuntime.promise = prepareMergedPlaylistCache(record, { reason: reason || 'catalog-refresh', forceSync: true }).catch(function (error) {
+    console.warn('[MergedPlaylistCache]', reason || '', error);
+    return { snapshot: mergedPlaylistCacheRuntime.snapshot, changed: false, partial: true, errors: [{ error: error && error.message || String(error) }] };
+  }).finally(function () {
+    mergedPlaylistCacheRuntime.promise = null;
+  });
+  return mergedPlaylistCacheRuntime.promise;
+}
+// 收藏/喜欢（红心）等改变源歌单内容的操作成功后调用：
+// 先使合并歌单缓存失效（内存 + IndexedDB），再后台重同步，
+// 保证下次加载合并歌单时能拿到包含新收藏歌曲的最新内容。
+async function markMergedPlaylistDirty(reason) {
+  if (!(fx && fx.shelfMergeCollections) || typeof invalidateMergedPlaylistCache !== 'function') return Promise.resolve(null);
+  var accountKey = currentMergedPlaylistAccountKey();
+  try {
+    await invalidateMergedPlaylistCache(accountKey);
+  } catch (e) {
+    console.warn('[MergedPlaylistCache] invalidate failed:', e);
+  }
+  return scheduleMergedPlaylistCacheSync(reason || 'like-toggle');
+}
+function createMergedPlaylistPagerForRecord(record, signal) {
+  record = record || {};
+  return createMergedPlaylistPager(record.sources || [], function (source, offset, limit) {
+    return mergedPlaylistSourcePage(source, offset, limit, signal);
+  });
+}
+function fetchMergedPlaylistPage(pager, limit) {
+  if (!pager || typeof pager.next !== 'function') return Promise.resolve({ tracks: [], total: 0, nextOffset: 0, hasMore: false, partial: true, errors: [{ error: 'MERGED_PLAYLIST_PAGER_MISSING' }] });
+  return pager.next(limit);
+}
+// 一次加载合并歌单的全部歌曲：循环调用分页器直到取完，不再依赖
+// 滚动/后台 hydration 逐页补充。缓存分页器直接吐全量（快），网络分页器
+// 会连续拉取所有源的所有分页直到完成。
+async function loadAllMergedPlaylistTracks(pager, batchSize) {
+  var all = [];
+  var errors = [];
+  var partial = false;
+  var total = 0;
+  var batch = Math.max(1, Number(batchSize) || 200);
+  var guard = 0;
+  while (pager && typeof pager.next === 'function') {
+    guard += 1;
+    if (guard > 500) break; // 安全兜底，避免异常分页器死循环
+    var page = await fetchMergedPlaylistPage(pager, batch);
+    if (!page || typeof page !== 'object') break;
+    all.push.apply(all, Array.isArray(page.tracks) ? page.tracks : []);
+    errors = errors.concat(Array.isArray(page.errors) ? page.errors : []);
+    total = Math.max(total, Number(page.total) || 0, all.length);
+    if (page.partial) partial = true;
+    if (!page.hasMore) break;
+  }
+  return {
+    tracks: all,
+    total: Math.max(total, all.length),
+    nextOffset: all.length,
+    hasMore: false,
+    partial: partial || errors.length > 0,
+    errors: errors,
+  };
 }
 function cancelPlaylistQueueHydration(reason) {
   var previous = queueHydrationState;
@@ -142,7 +284,10 @@ async function hydratePlaylistQueueNextPage(reason) {
   var limit = playlistQueuePageSize(state.provider, false);
   state.loading = true;
   state.pausedForBuffer = false;
-  state.promise = apiJson(playlistQueuePageUrl(source, offset, limit), { timeoutMs: 16000 }).then(function (r) {
+  var pageRequest = state.provider === MERGED_PLAYLIST_PROVIDER
+    ? fetchMergedPlaylistPage(state.mergedPager, limit)
+    : apiJson(playlistQueuePageUrl(source, offset, limit), { timeoutMs: 16000 });
+  state.promise = pageRequest.then(function (r) {
     if (!playlistQueueHydrationValid(state, token)) return false;
     var rawTracks = r && r.tracks || [];
     if (r && r.error && !rawTracks.length) throw new Error(r.message || r.error);
@@ -152,10 +297,15 @@ async function hydratePlaylistQueueNextPage(reason) {
     if (pageTracks.length) Array.prototype.push.apply(playQueue, pageTracks);
     state.loaded = playQueue.length;
     state.total = Math.max(state.total || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0, state.loaded);
-    state.nextOffset = Math.max(Number(r && r.nextOffset) || 0, offset + rawTracks.length);
+    state.nextOffset = state.provider === MERGED_PLAYLIST_PROVIDER
+      ? Math.max(Number(r && r.nextOffset) || 0, offset + rawTracks.length)
+      : Math.max(Number(r && r.nextOffset) || 0, offset + rawTracks.length);
     state.hasMore = !!(r && r.hasMore);
+    state.partial = state.partial || !!(r && r.partial);
     if (!rawTracks.length || state.nextOffset <= offset) state.hasMore = false;
-    state.active = state.hasMore || (!!state.total && state.nextOffset < state.total);
+    state.active = state.provider === MERGED_PLAYLIST_PROVIDER
+      ? state.hasMore
+      : (state.hasMore || (!!state.total && state.nextOffset < state.total));
     state.pausedForBuffer = state.active;
     safeRenderQueuePanel('playlist-queue-hydrate', { animate: false, scrollCurrent: false });
     if (!state.active) {
@@ -185,7 +335,9 @@ function retryPlaylistQueueHydration() {
   var state = queueHydrationState;
   if (!state || state.queueRef !== playQueue) return false;
   state.error = '';
-  state.active = state.hasMore || !state.total || state.nextOffset < state.total;
+  state.active = state.provider === MERGED_PLAYLIST_PROVIDER
+    ? state.hasMore
+    : (state.hasMore || !state.total || state.nextOffset < state.total);
   if (!state.active) return false;
   state.pausedForBuffer = false;
   hydratePlaylistQueueNextPage('retry');
@@ -218,11 +370,21 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
   cancelPlaylistQueueHydration('new-playlist');
   var source = playlistQueueSource(id);
   var token = (queueHydrationState && queueHydrationState.token || 0) + 1;
+  var mergedPager = opts.mergedPager || null;
   var r = null;
   var seedTracks = Array.isArray(opts.seedTracks) && opts.seedTracks.length ? opts.seedTracks.map(cloneSong) : [];
   try {
     if (!seedTracks.length) {
-      r = await apiJson(playlistQueuePageUrl(source, 0, playlistQueuePageSize(source.provider, true)), { timeoutMs: 16000 });
+      if (source.provider === MERGED_PLAYLIST_PROVIDER && !mergedPager) {
+        var cacheRecord = mergedPlaylistRecordForId(source.id);
+        var cacheResult = await prepareMergedPlaylistCache(cacheRecord);
+        mergedPager = cacheResult && cacheResult.snapshot
+          ? createMergedPlaylistCachedPager(cacheResult.snapshot)
+          : createMergedPlaylistPagerForRecord(cacheRecord);
+      }
+      r = source.provider === MERGED_PLAYLIST_PROVIDER
+        ? await loadAllMergedPlaylistTracks(mergedPager, playlistQueuePageSize(source.provider, true))
+        : await apiJson(playlistQueuePageUrl(source, 0, playlistQueuePageSize(source.provider, true)), { timeoutMs: 16000 });
       seedTracks = (r && r.tracks || []).map(cloneSong);
     } else {
       r = {
@@ -251,7 +413,7 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
     var total = Math.max(playQueue.length, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || Number(opts.total) || Number(catalogPlaylist && catalogPlaylist.trackCount) || 0);
     var nextOffset = Math.max(Number(r && r.nextOffset) || Number(opts.nextOffset) || playQueue.length, playQueue.length);
     var hasMore = opts.hasMore != null ? !!opts.hasMore : !!(r && r.hasMore);
-    if (total > nextOffset) hasMore = true;
+    if (source.provider !== MERGED_PLAYLIST_PROVIDER && total > nextOffset) hasMore = true;
     var liked = isLikedPlaylistContext(id, title, r && r.playlist);
     if (liked) markSongsLiked(playQueue, true);
     else if (source.provider === 'netease') syncLikeStatusForSongs(playQueue);
@@ -273,7 +435,9 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
       queueRef: playQueue,
       liked: liked,
       warmPagesRemaining: hasMore ? 1 : 0,
-      pausedForBuffer: false
+      pausedForBuffer: false,
+      mergedPager: mergedPager,
+      partial: !!(r && r.partial) || !!opts.partial
     };
     currentIdx = Math.max(0, Math.min(playQueue.length - 1, Number(opts.startIndex) || 0));
     safeRenderQueuePanel('playlist-load-first-page', { animate: true, scrollCurrent: true, deferWhenHidden: false });

@@ -13,7 +13,7 @@
   <script src="vendor/music-tempo.min.js"></script>
   <script src="vendor/gsap.min.js"></script>
   <script src="js/preload-mode.js"></script>
-  <link rel="stylesheet" href="css/index.css?v=20260716-we-continuity-vsync">
+  <link rel="stylesheet" href="css/index.css?v=20260716-we-continuity-vsync"><link rel="stylesheet" href=".mineradio-lx-addon/ui/user-api-panel.css">
 </head>
 
 <body>
@@ -1016,8 +1016,18 @@
             <button class="fx-mini-btn ghost" type="button" onclick="runSystemMemoryPurge(false)">系统释放</button>
             <button class="fx-mini-btn ghost" type="button" onclick="runSystemMemoryPurge(true)">提权释放</button>
           </div>
+          <div class="fx-section-label">歌曲下载</div>
+          <div class="cache-storage-panel download-storage-panel" id="download-storage-panel">
+            <div class="cache-storage-head"><span>歌曲下载目录</span></div>
+            <code class="cache-storage-path" id="download-storage-root">正在读取...</code>
+            <div class="cache-storage-actions">
+              <button class="fx-mini-btn ghost" type="button" onclick="chooseMineradioDownloadRoot()">修改目录</button>
+              <button class="fx-mini-btn ghost" type="button" onclick="refreshMineradioDownloadSettings()">刷新</button>
+            </div>
+            <div class="fx-sub cache-storage-note">首次下载时会选择目录，之后自动使用已保存的目录。</div>
+          </div>
           <div class="fx-section-label">本地缓存</div>
-          <div class="cache-storage-panel" id="cache-storage-panel">
+          <div class="cache-storage-panel" id="cache-storage-panel"><div class="mineradio-lx-user-api-panel" id="mineradio-lx-user-api-panel"></div>
             <div class="cache-storage-head"><span>统一缓存目录</span><span id="cache-storage-total">读取中...</span></div>
             <code class="cache-storage-path" id="cache-storage-root">桌面版启动后读取</code>
             <div class="cache-storage-actions">
@@ -1301,6 +1311,7 @@
               <path d="M12 5v14" />
               <path d="M5 12h14" />
             </svg></button>
+          <button id="download-btn" class="ctrl-btn" onclick="downloadCurrentSong()" title="下载歌曲" aria-label="下载歌曲"><svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 21h14" /></svg></button>
         </div>
         <div class="control-cluster transport">
           <button id="play-mode-btn" class="ctrl-btn" onclick="cyclePlayMode()" title="播放顺序"><svg id="play-mode-icon"

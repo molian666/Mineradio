@@ -1,3 +1,4 @@
+/* mineradio-lx-addon: playback-entry-bridge provider fallback */
 var firstPlayDone = false;
 
 function playbackProviderLabel(song) {
@@ -694,9 +695,17 @@ async function tryAutoPlaybackFallback(song, data, idx, token, opts) {
         return settleSourceFallbackTerminal(idx, token, '自动恢复已达到时间上限，请稍后手动重试。', skipOpts);
       }
       if (!alternate) continue;
-      var alternateData = typeof resolveAlbumGaplessPlaybackData === 'function'
-        ? await awaitSourceFallbackBudget(resolveAlbumGaplessPlaybackData(alternate), recovery)
-        : null;
+      var alternateData = null;
+      if (typeof mineradioLxResolveImportedSong === 'function') {
+        try {
+          alternateData = await awaitSourceFallbackBudget(mineradioLxResolveImportedSong(alternate, getProviderPlaybackQuality(alternateProvider)), recovery);
+        } catch (importedError) {
+          console.warn('[Mineradio-LX UserApi] provider fallback failed:', importedError && importedError.message || importedError);
+        }
+      }
+      if (!alternateData && typeof resolveAlbumGaplessPlaybackData === 'function') {
+        alternateData = await awaitSourceFallbackBudget(resolveAlbumGaplessPlaybackData(alternate), recovery);
+      }
       if (token !== trackSwitchToken) return false;
       if (alternateData === sourceFallbackBudgetTimeoutResult || !sourceFallbackRecoveryCanContinue(recovery)) {
         return settleSourceFallbackTerminal(idx, token, '自动恢复已达到时间上限，请稍后手动重试。', skipOpts);

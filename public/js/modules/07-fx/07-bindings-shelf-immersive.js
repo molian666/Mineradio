@@ -420,6 +420,10 @@ function toggleFx(key) {
   }
   if (key === 'wallpaperMode') applyWallpaperModeState(true);
   if (key === 'shelfShowPodcasts' || key === 'shelfMergeCollections') {
+    if (key === 'shelfMergeCollections') {
+      if (typeof closePlaylistPanelDetail === 'function') closePlaylistPanelDetail('歌单目录已切换');
+      if (typeof rebuildUserPlaylistsFromCatalog === 'function') rebuildUserPlaylistsFromCatalog({ animate: false, reset: true, preserveScroll: false, reason: 'playlist-merge-toggle' });
+    }
     if (shelfManager && shelfManager.rebuild) shelfManager.rebuild(true);
     if (shelfManager && shelfManager.refreshTheme) shelfManager.refreshTheme();
   }

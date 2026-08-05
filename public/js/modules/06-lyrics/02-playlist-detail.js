@@ -1,4 +1,4 @@
-var playlistPanelDetailState = { key: '', loading: false, loadingMore: false, playlist: null, tracks: [], token: 0, total: 0, nextOffset: 0, hasMore: false, scrollTop: 0, controller: null, warmTimer: 0, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
+var playlistPanelDetailState = { key: '', loading: false, loadingMore: false, playlist: null, tracks: [], token: 0, total: 0, nextOffset: 0, hasMore: false, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
 function queueVirtualSpacerHtml(height) {
   height = Math.max(0, Math.round(Number(height) || 0));
   return height ? '<div class="queue-virtual-spacer" aria-hidden="true" style="height:' + height + 'px"></div>' : '';
@@ -115,15 +115,16 @@ function bindMiniQueueLazyRender() {
   }, { passive: true });
 }
 function normalizePlaylistProvider(provider) {
-  if (provider === 'qq' || provider === 'kugou' || provider === 'qishui' || provider === 'spotify') return provider;
+  if (provider === 'qq' || provider === 'kugou' || provider === 'qishui' || provider === 'spotify' || provider === MERGED_PLAYLIST_PROVIDER) return provider;
   return 'netease';
 }
 function playlistProviderLabel(provider) {
   provider = normalizePlaylistProvider(provider);
-  return provider === 'qq' ? 'QQ' : (provider === 'kugou' ? 'KG' : (provider === 'qishui' ? 'QS' : (provider === 'spotify' ? 'SP' : 'NE')));
+  return provider === MERGED_PLAYLIST_PROVIDER ? 'ALL' : (provider === 'qq' ? 'QQ' : (provider === 'kugou' ? 'KG' : (provider === 'qishui' ? 'QS' : (provider === 'spotify' ? 'SP' : 'NE'))));
 }
 function playlistProviderName(provider) {
   provider = normalizePlaylistProvider(provider);
+  if (provider === MERGED_PLAYLIST_PROVIDER) return '跨平台';
   if (provider === 'spotify') return 'Spotify';
   return provider === 'qq' ? 'QQ 音乐' : (provider === 'kugou' ? '酷狗音乐' : (provider === 'qishui' ? '汽水音乐' : '网易云音乐'));
 }
@@ -133,11 +134,30 @@ function playlistPanelKey(provider, id) {
 }
 function playlistPanelProviderId(provider, id) {
   provider = normalizePlaylistProvider(provider);
+  if (provider === MERGED_PLAYLIST_PROVIDER) return 'merged:' + id;
   if (provider === 'qq') return 'qq:' + id;
   if (provider === 'kugou') return 'kugou:' + id;
   if (provider === 'qishui') return 'qishui:' + id;
   if (provider === 'spotify') return 'spotify:' + id;
   return id;
+}
+function closePlaylistPanelDetail(reason) {
+  cancelPlaylistPanelDetailRequest();
+  playlistPanelDetailState.token += 1;
+  playlistPanelDetailState.key = '';
+  playlistPanelDetailState.loading = false;
+  playlistPanelDetailState.loadingMore = false;
+  playlistPanelDetailState.playlist = null;
+  playlistPanelDetailState.tracks = [];
+  playlistPanelDetailState.total = 0;
+  playlistPanelDetailState.nextOffset = 0;
+  playlistPanelDetailState.hasMore = false;
+  playlistPanelDetailState.mergedPager = null;
+  playlistPanelDetailState.partial = false;
+  playlistPanelDetailState.error = '';
+  playlistPanelDetailState.message = reason || '';
+  playlistPanelDetailState.renderLimit = PLAYLIST_DETAIL_INITIAL_RENDER;
+  if (typeof renderPlaylistPanelDetailState === 'function') renderPlaylistPanelDetailState();
 }
 function playlistCardPriority(pl) {
   if (!pl) return 10;
@@ -186,6 +206,8 @@ function playlistPanelDetailRowsHtml(options) {
   rows += '<div class="pl-detail-virtual-spacer" aria-hidden="true" style="height:' + (Math.max(0, tracks.length - end) * PLAYLIST_DETAIL_ROW_STEP) + 'px"></div>';
   if (st.error) {
     rows += '<div class="pl-detail-progress">后续歌曲载入失败，重新打开歌单可继续</div>';
+  } else if (st.partial) {
+    rows += '<div class="pl-detail-progress">部分平台歌单载入失败 · 已显示可用歌曲</div>';
   } else if (st.hasMore || st.loadingMore) {
     rows += '<div class="pl-detail-progress"><span class="queue-hydration-spinner' + (st.loadingMore ? ' spinning' : '') + '"></span><span>' +
       (st.loadingMore ? '正在预载后续歌曲 ' : '继续滚动加载 ') + tracks.length + (st.total ? '/' + st.total : '') + '</span></div>';
@@ -361,12 +383,24 @@ async function loadMorePlaylistPanelDetailTracks(reason) {
   var offset = reason === 'initial' ? 0 : Math.max(0, Number(st.nextOffset) || st.tracks.length);
   var token = st.token;
   var controller = window.AbortController ? new AbortController() : null;
-  var timer = controller ? setTimeout(function () { controller.abort(); }, 12000) : 0;
+  // 合并歌单为一次性全量加载，可能超过普通请求的 12s，不设请求级 abort；
+  // 其余平台歌单保持原有 12s 超时。
+  var timer = controller && provider !== MERGED_PLAYLIST_PROVIDER ? setTimeout(function () { controller.abort(); }, 12000) : 0;
   st.controller = controller;
   st.loadingMore = reason !== 'initial';
   if (st.loadingMore) renderPlaylistPanelDetailRows();
   try {
-    var r = await apiJson(playlistTracksEndpoint(provider, pid, { limit: PLAYLIST_DETAIL_BATCH_SIZE, offset: offset }), controller ? { signal: controller.signal } : { timeoutMs: 12000 });
+    if (provider === MERGED_PLAYLIST_PROVIDER) {
+      if (!st.mergedPager) {
+        var cacheResult = await prepareMergedPlaylistCache(st.playlist, { signal: controller ? controller.signal : null });
+        st.mergedPager = cacheResult && cacheResult.snapshot
+          ? createMergedPlaylistCachedPager(cacheResult.snapshot)
+          : createMergedPlaylistPagerForRecord(st.playlist, controller ? controller.signal : null);
+      }
+    }
+    var r = provider === MERGED_PLAYLIST_PROVIDER
+      ? await loadAllMergedPlaylistTracks(st.mergedPager, PLAYLIST_DETAIL_BATCH_SIZE)
+      : await apiJson(playlistTracksEndpoint(provider, pid, { limit: PLAYLIST_DETAIL_BATCH_SIZE, offset: offset }), controller ? { signal: controller.signal } : { timeoutMs: 12000 });
     if (playlistPanelDetailState.token !== token || playlistPanelDetailState.key !== st.key) return false;
     var rawTracks = r && r.tracks || [];
     if (r && r.error && !rawTracks.length) throw new Error(r.message || r.error);
@@ -374,13 +408,16 @@ async function loadMorePlaylistPanelDetailTracks(reason) {
     var added = appendPlaylistPanelDetailTracks(st.tracks, mapped);
     var responseTotal = Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0;
     st.total = Math.max(st.total || 0, responseTotal, st.tracks.length);
-    st.nextOffset = Math.max(offset + rawTracks.length, Number(r && r.nextOffset) || 0);
+    st.nextOffset = provider === MERGED_PLAYLIST_PROVIDER
+      ? Math.max(st.tracks.length, Number(r && r.nextOffset) || 0)
+      : Math.max(offset + rawTracks.length, Number(r && r.nextOffset) || 0);
     st.hasMore = !!(r && r.hasMore);
     if (!rawTracks.length || (!added && st.nextOffset <= offset)) st.hasMore = false;
     st.loading = false;
     st.loadingMore = false;
     st.error = (r && r.error) || '';
-    st.message = (r && (r.message || r.warning)) || '';
+    st.partial = st.partial || !!(r && r.partial);
+    st.message = st.partial ? '部分平台歌单载入失败，已显示可用歌曲' : ((r && (r.message || r.warning)) || '');
     if (r && r.playlist) st.playlist = Object.assign({}, st.playlist || {}, r.playlist);
     if (reason === 'initial') {
       renderPlaylistPanelDetailState();
@@ -429,7 +466,7 @@ async function openPlaylistPanelDetail(provider, pid, title) {
   }
   cancelPlaylistPanelDetailRequest();
   var token = ++playlistPanelDetailState.token;
-  playlistPanelDetailState = { key: key, loading: true, loadingMore: false, playlist: pl, tracks: [], token: token, total: Number(pl.trackCount) || 0, nextOffset: 0, hasMore: true, scrollTop: 0, controller: null, warmTimer: 0, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
+  playlistPanelDetailState = { key: key, loading: true, loadingMore: false, playlist: pl, tracks: [], token: token, total: Number(pl.trackCount) || 0, nextOffset: 0, hasMore: true, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
   renderPlaylistPanelDetailState();
   scrollPlaylistPanelDetailIntoView(key);
   await loadMorePlaylistPanelDetailTracks('initial');
@@ -495,6 +532,8 @@ function playPlaylistPanelDetailTrack(index) {
     total: playlistPanelDetailState.total,
     nextOffset: playlistPanelDetailState.nextOffset,
     hasMore: playlistPanelDetailState.hasMore,
+    mergedPager: playlistPanelDetailState.mergedPager,
+    partial: playlistPanelDetailState.partial,
     preserveHomeState: true
   });
 }
@@ -540,7 +579,7 @@ function playlistPanelBuildVirtualEntries() {
   if (playlistPanelVirtualCache.revision === playlistCatalogRevision &&
       playlistPanelVirtualCache.detailKey === playlistPanelDetailState.key &&
       playlistPanelVirtualCache.detailSig === detailSig) return playlistPanelVirtualCache;
-  var labels = { netease: '网易云歌单', qq: 'QQ 音乐歌单', kugou: '酷狗音乐歌单', qishui: '汽水音乐歌单', spotify: 'Spotify 歌单' };
+  var labels = { netease: '网易云歌单', qq: 'QQ 音乐歌单', kugou: '酷狗音乐歌单', qishui: '汽水音乐歌单', spotify: 'Spotify 歌单', merged: '跨平台合并歌单' };
   var order = ['netease', 'qq', 'kugou', 'qishui', 'spotify'];
   var groups = { netease: [], qq: [], kugou: [], qishui: [], spotify: [] };
   userPlaylists.forEach(function (pl, sourceIndex) {

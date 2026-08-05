@@ -49,6 +49,8 @@ backups/
 .env.*
 
 # Local development noise
+.worktrees/
+.reasonix/
 .DS_Store
 Thumbs.db
 desktop.ini

@@ -14,6 +14,7 @@ const {
   LocalMusicLibrary,
   registerLocalMusicScheme,
 } = require('./local-music-library');
+const { createSongDownloadService, sourceUrlIsHttp } = require('./song-download');
 const { WallpaperEngineRuntime } = require('./wallpaper-engine-runtime');
 const { FullDesktopModeRuntime } = require('./full-desktop-mode-runtime');
 const {
@@ -32,6 +33,10 @@ const {
 
 registerWallpaperEngineScheme(protocol);
 registerLocalMusicScheme(protocol);
+/* mineradio-lx-addon: isolated UserApi runtime */
+app.setPath('userData', path.join(app.getPath('appData'), 'Mineradio-LX', 'userData'));
+app.setPath('cache', path.join(app.getPath('appData'), 'Mineradio-LX', 'cache'));
+const userApiRuntime = require('../.mineradio-lx-addon/runtime/user-api-main').registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, preloadPath: path.join(__dirname, '..', '.mineradio-lx-addon', 'runtime', 'user-api-preload.js') });
 
 let mainWindow = null;
 let localServer = null;
@@ -71,6 +76,7 @@ let closeBehavior = 'exit';
 let appQuitting = false;
 let appQuitCleanupPromise = null;
 let appQuitCleanupComplete = false;
+let appQuitHardExitTimer = null;
 let mainWindowCloseFlushArmed = false;
 let tray = null;
 let startupCompleted = false;
@@ -116,6 +122,7 @@ const RENDERER_RECOVERY_WINDOW_MS = 2 * 60 * 1000;
 const RENDERER_RECOVERY_MAX_ATTEMPTS = 3;
 const FULLSCREEN_VISIBILITY_CHECK_MS = 5000;
 const CACHE_SETTINGS_FILE = 'cache-settings.json';
+const DOWNLOAD_SETTINGS_FILE = 'download-settings.json';
 const LYRIC_CACHE_VERSION = 1;
 const LYRIC_CACHE_MAX_BYTES = 96 * 1024 * 1024;
 const LYRIC_CACHE_ENTRY_MAX_BYTES = 1024 * 1024;
@@ -156,6 +163,10 @@ process.env.MINERADIO_NATIVE_TEMP_DIR = NATIVE_HELPER_TEMP_PATH;
 systemMemory.setNativeTempPath(NATIVE_HELPER_TEMP_PATH);
 const localMusicLibrary = new LocalMusicLibrary({ userDataPath: STABLE_USER_DATA_PATH });
 const localMusicImportCapabilities = new Map();
+const songDownloadService = createSongDownloadService({
+  settingsFile: path.join(STABLE_USER_DATA_PATH, DOWNLOAD_SETTINGS_FILE),
+  dialog,
+});
 const wallpaperEngineLibrary = new WallpaperEngineLibrary({ userDataPath: STABLE_USER_DATA_PATH });
 const wallpaperEngineRuntime = new WallpaperEngineRuntime({
   library: wallpaperEngineLibrary,
@@ -3533,12 +3544,29 @@ while ($true) {
 }
 
 function stopDesktopLyricsMousePoller() {
-  if (!desktopLyricsMousePoller) return;
+  const poller = desktopLyricsMousePoller;
+  if (!poller) return Promise.resolve();
   try {
-    desktopLyricsMousePoller.kill();
+    poller.kill();
   } catch (e) {}
   desktopLyricsMousePoller = null;
   desktopLyricsMousePollerBuffer = '';
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 1000);
+    if (poller.once) {
+      poller.once('exit', finish);
+      poller.once('error', finish);
+    } else {
+      finish();
+    }
+  });
 }
 
 function broadcastDesktopLyricsLockState() {
@@ -3964,6 +3992,45 @@ ipcMain.handle('mineradio-cache-set-settings', async (_event, payload = {}) => {
   } catch (error) {
     return { ok: false, error: error.message || 'CACHE_SETTINGS_WRITE_FAILED' };
   }
+});
+
+function songDownloadProxyUrl(sourceUrl) {
+  const port = Number(mainServerPort || process.env.PORT || 3000);
+  return `http://127.0.0.1:${port}/api/audio?url=${encodeURIComponent(sourceUrl)}`;
+}
+
+ipcMain.handle('mineradio-download-get-settings', async (event) => {
+  if (!isTrustedMainWindowIpc(event)) return { ok: false, error: 'UNTRUSTED_SENDER' };
+  return songDownloadService.getSettings();
+});
+
+ipcMain.handle('mineradio-download-choose-directory', async (event) => {
+  if (!isTrustedMainWindowIpc(event)) return { ok: false, error: 'UNTRUSTED_SENDER' };
+  try {
+    return await songDownloadService.chooseDirectory();
+  } catch (error) {
+    return { ok: false, error: error.message || 'DOWNLOAD_DIRECTORY_CHOOSE_FAILED' };
+  }
+});
+
+ipcMain.handle('mineradio-download-set-directory', async (event, payload = {}) => {
+  if (!isTrustedMainWindowIpc(event)) return { ok: false, error: 'UNTRUSTED_SENDER' };
+  return songDownloadService.setDirectory(payload && payload.path);
+});
+
+ipcMain.handle('mineradio-download-song', async (event, payload = {}) => {
+  if (!isTrustedMainWindowIpc(event)) return { ok: false, error: 'UNTRUSTED_SENDER' };
+  const song = payload && payload.song && typeof payload.song === 'object' ? payload.song : payload;
+  if (!song || song.type === 'local' || song.source === 'local' || song.localUrl) {
+    return { ok: false, error: 'LOCAL_SONG_ALREADY_AVAILABLE', code: 'LOCAL_SONG_ALREADY_AVAILABLE' };
+  }
+  const sourceUrl = String(payload && (payload.url || payload.sourceUrl) || '').trim();
+  if (!sourceUrlIsHttp(sourceUrl)) return { ok: false, error: 'DOWNLOAD_INVALID_URL', code: 'DOWNLOAD_INVALID_URL' };
+  return songDownloadService.download({
+    url: songDownloadProxyUrl(sourceUrl),
+    artist: song.artist || song.artists || '',
+    title: song.name || song.title || '',
+  });
 });
 
 ipcMain.handle('mineradio-wallpaper-engine-list', async (event, payload = {}) => {
@@ -4464,7 +4531,13 @@ ipcMain.handle('mineradio-cache-write-lyric', async (_event, key, payload) => {
 
 ipcMain.handle('desktop-window-close', (event, behavior) => {
   const win = getSenderWindow(event);
-  if (behavior) closeBehavior = normalizeCloseBehavior(behavior);
+  const requestedBehavior = behavior ? normalizeCloseBehavior(behavior) : closeBehavior;
+  if (behavior) closeBehavior = requestedBehavior;
+  if (requestedBehavior === 'exit') {
+    appQuitting = true;
+    app.quit();
+    return;
+  }
   win?.close();
 });
 
@@ -5012,6 +5085,67 @@ async function ensureLocalServerStarted() {
     localServerStartPromise = null;
   });
   return localServerStartPromise;
+}
+
+function closeLocalServerInstance(server) {
+  if (!server || typeof server.close !== 'function' || !server.listening) return Promise.resolve();
+  // 退出清理时渲染进程仍可能持有活跃的音频流 / keep-alive 连接，
+  // server.close() 不会主动断开它们，回调会被拖到 5s 兜底才触发。
+  // 先主动断开空闲与全部连接（Node >= 18.2），把关闭等待降为即时。
+  try {
+    if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+    if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  } catch (_) {}
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, 5000);
+    try { server.close(finish); } catch (_) { finish(); }
+  });
+}
+
+async function closeLocalServer() {
+  const pendingStart = localServerStartPromise;
+  if (pendingStart) await Promise.resolve(pendingStart).catch(() => {});
+  const server = localServer;
+  localServer = null;
+  mainServerPort = 0;
+  await closeLocalServerInstance(server);
+}
+
+function destroyAllWindowsForQuit() {
+  try {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win || win.isDestroyed()) continue;
+      try { win.destroy(); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+function forceTerminateOwnedProcessTree() {
+  if (process.platform !== 'win32') {
+    try { app.exit(0); } catch (_) { process.exit(0); }
+    return;
+  }
+  const taskkillPath = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+  try {
+    const killer = execFile(taskkillPath, ['/PID', String(process.pid), '/T', '/F'], {
+      windowsHide: true,
+    }, (error) => {
+      if (!error) return;
+      console.warn('[Shutdown] taskkill process-tree fallback failed:', error.message || error);
+      try { app.exit(0); } catch (_) { process.exit(0); }
+    });
+    if (killer && typeof killer.unref === 'function') killer.unref();
+  } catch (error) {
+    console.warn('[Shutdown] taskkill process-tree fallback unavailable:', error.message || error);
+    try { app.exit(0); } catch (_) { process.exit(0); }
+  }
 }
 
 function showMainWindowSafely(win, reason) {
@@ -5612,13 +5746,23 @@ if (!gotSingleInstanceLock) {
     if (appQuitCleanupComplete) return;
     event.preventDefault();
     if (appQuitCleanupPromise) return;
+    const hardExitTimeoutMs = Math.max(
+      2000,
+      Math.min(15000, Number(process.env.MINERADIO_SHUTDOWN_HARD_TIMEOUT_MS) || 8000)
+    );
+    appQuitHardExitTimer = setTimeout(() => {
+      if (appQuitCleanupComplete) return;
+      console.warn(`[Shutdown] cleanup exceeded ${hardExitTimeoutMs}ms; terminating the Mineradio process tree.`);
+      destroyAllWindowsForQuit();
+      forceTerminateOwnedProcessTree();
+    }, hardExitTimeoutMs);
     clearWallpaperEngineCaptureGrant();
     wallpaperEngineLibrary.dispose();
     stopMemoryAutoTimer();
     unregisterFullDesktopEscapeShortcut();
     unregisterMineradioGlobalHotkeys();
+    const desktopLyricsPollerCleanup = stopDesktopLyricsMousePoller();
     closeDesktopLyricsWindow();
-    if (localServer && localServer.close) localServer.close();
     if (tray) {
       try { tray.destroy(); } catch (e) {}
       tray = null;
@@ -5665,6 +5809,11 @@ if (!gotSingleInstanceLock) {
     };
     let cleanupTimeout = null;
     const fullDesktopAndWallpaperEngineCleanup = (async () => {
+      await desktopLyricsPollerCleanup;
+      await closeLocalServer();
+      await userApiRuntime.dispose().catch((error) => {
+        console.warn('[UserApi] dispose failed:', error && error.message || error);
+      });
       // A passive desktop host must become a verified top-level HWND before
       // its exact WE source/DWM companion is disposed. Running these in
       // parallel can race the native detach acknowledgement.
@@ -5686,8 +5835,11 @@ if (!gotSingleInstanceLock) {
     });
     appQuitCleanupPromise = Promise.race([runtimeCleanup, timeoutCleanup]).finally(() => {
       if (cleanupTimeout) clearTimeout(cleanupTimeout);
+      if (appQuitHardExitTimer) clearTimeout(appQuitHardExitTimer);
+      appQuitHardExitTimer = null;
       appQuitCleanupComplete = true;
-      app.quit();
+      destroyAllWindowsForQuit();
+      app.exit(0);
     });
   });
 }

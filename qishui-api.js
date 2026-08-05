@@ -2560,6 +2560,30 @@ async function handleQishuiFeed(limit, cookieText) {
   return fetchQishuiFeedSongs(Math.max(1, Math.min(18, Number(limit) || 8)), cookieText);
 }
 
+// 汽水音乐目前没有公开的热歌榜/歌单广场接口（volcengine 公共域仅支持
+// 关键词搜索与按 ID 取详情；网页版 /luna/pc/* 均需要登录 cookie）。
+// 与项目"没有可信接口时明确留空"的原则一致，返回明确错误而不是用关键词搜索补位。
+async function handleQishuiTop() {
+  return {
+    provider: 'qishui',
+    name: '汽水热歌榜',
+    songs: [],
+    error: 'QISHUI_TOP_UNAVAILABLE',
+    message: '汽水音乐暂无公开热歌榜接口，未使用关键词搜索替代。',
+    updatedAt: Date.now(),
+  };
+}
+
+async function handleQishuiRecommendPlaylists() {
+  return {
+    provider: 'qishui',
+    playlists: [],
+    error: 'QISHUI_PLAYLIST_UNAVAILABLE',
+    message: '汽水音乐暂无公开歌单广场接口，未使用关键词搜索替代。',
+    updatedAt: Date.now(),
+  };
+}
+
 function buildQishuiFeedPlaylist(songs) {
   songs = Array.isArray(songs) ? songs : [];
   const firstCover = songs.map(song => song && song.cover).find(Boolean) || '';
@@ -3461,6 +3485,8 @@ module.exports = {
   clearQishuiAccessToken,
   handleQishuiSearch,
   handleQishuiFeed,
+  handleQishuiTop,
+  handleQishuiRecommendPlaylists,
   handleQishuiUserPlaylists,
   handleQishuiPlaylistTracks,
   handleQishuiCheckTracksLiked,

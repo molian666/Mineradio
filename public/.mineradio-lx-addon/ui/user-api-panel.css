@@ -1,0 +1,545 @@
+.mineradio-lx-user-api-panel {
+  color: rgba(255, 255, 255, .86);
+  margin-top: 12px;
+  max-width: 720px;
+}
+
+.mineradio-lx-user-api-panel .fx-section-label {
+  margin-top: 12px;
+}
+
+.mineradio-lx-user-api-panel .fx-section-label:first-child {
+  margin-top: 0;
+}
+
+.mineradio-lx-user-api-panel .fx-sub {
+  line-height: 1.5;
+  margin: 6px 0 0;
+}
+
+.mineradio-lx-source-fold {
+  margin-top: 12px;
+}
+
+.mineradio-lx-source-fold .fx-fold-body {
+  padding-bottom: 12px;
+}
+
+.cs-fold-list,
+.cs-list {
+  display: grid;
+  gap: 7px;
+}
+
+.cs-fold-list {
+  margin-bottom: 10px;
+}
+
+.cs-fold-item {
+  align-items: center;
+  color: rgba(255, 255, 255, .75);
+  display: grid;
+  font-size: 11px;
+  gap: 7px;
+  grid-template-columns: 8px 1fr auto;
+}
+
+.cs-fold-item small,
+.cs-card small {
+  color: rgba(255, 255, 255, .38);
+  font-size: 10px;
+}
+
+.cs-fold-item.disabled {
+  opacity: .45;
+}
+
+.cs-fi-dot {
+  background: #7fd8ff;
+  border-radius: 50%;
+  height: 6px;
+  width: 6px;
+}
+
+.cs-fold-empty,
+.cs-empty {
+  color: rgba(255, 255, 255, .4);
+  font-size: 11px;
+  padding: 5px 0 10px;
+}
+
+.cs-modal {
+  background: linear-gradient(150deg, rgba(24, 31, 40, .98), rgba(10, 14, 20, .97));
+  border: 1px solid rgba(127, 216, 255, .2);
+  border-radius: 14px;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, .62), 0 0 0 1px rgba(255, 255, 255, .035), inset 0 1px 0 rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .86);
+  max-height: min(680px, calc(100vh - 40px));
+  overflow: auto;
+  position: relative;
+  isolation: isolate;
+  width: min(620px, calc(100vw - 28px));
+  -webkit-backdrop-filter: blur(24px) saturate(125%);
+  backdrop-filter: blur(24px) saturate(125%);
+}
+
+.cs-modal::before {
+  background: radial-gradient(circle at 12% 0%, rgba(127, 216, 255, .13), transparent 30%), linear-gradient(180deg, rgba(255, 255, 255, .035), transparent 24%);
+  content: '';
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: -1;
+}
+
+.cs-modal-head {
+  align-items: center;
+  background: rgba(255, 255, 255, .025);
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+}
+
+.cs-modal-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cs-modal-kicker,
+.cs-section-kicker {
+  color: rgba(127, 216, 255, .72);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1.35px;
+}
+
+.cs-modal-heading strong {
+  color: rgba(255, 255, 255, .94);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: .35px;
+}
+
+.cs-modal-heading small {
+  color: rgba(255, 255, 255, .42);
+  font-size: 10px;
+}
+
+.cs-modal-close {
+  align-items: center;
+  background: rgba(255, 255, 255, .045);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, .62);
+  cursor: pointer;
+  display: grid;
+  flex: 0 0 auto;
+  font-size: 20px;
+  height: 34px;
+  line-height: 1;
+  place-items: center;
+  padding: 0;
+  width: 34px;
+}
+
+.cs-modal-close:hover {
+  background: rgba(127, 216, 255, .12);
+  border-color: rgba(127, 216, 255, .32);
+  color: #fff;
+}
+
+.cs-modal-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px 20px;
+}
+
+.cs-modal-note {
+  align-items: center;
+  background: rgba(127, 216, 255, .065);
+  border: 1px solid rgba(127, 216, 255, .14);
+  border-radius: 10px;
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.cs-note-mark {
+  align-items: center;
+  background: rgba(127, 216, 255, .16);
+  border: 1px solid rgba(127, 216, 255, .28);
+  border-radius: 7px;
+  color: #d9f5ff;
+  display: grid;
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 700;
+  height: 28px;
+  letter-spacing: .5px;
+  place-items: center;
+  width: 28px;
+}
+
+.cs-modal-note div,
+.cs-section-head div,
+.cs-import-panel-head div {
+  display: grid;
+  gap: 3px;
+}
+
+.cs-modal-note strong,
+.cs-import-panel-head strong,
+.cs-section-head strong {
+  color: rgba(255, 255, 255, .84);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.cs-modal-note small,
+.cs-import-panel-head small {
+  color: rgba(255, 255, 255, .4);
+  font-size: 10px;
+}
+
+.cs-source-section {
+  display: grid;
+  gap: 9px;
+}
+
+.cs-section-head {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+}
+
+.cs-count {
+  color: rgba(255, 255, 255, .38);
+  font-size: 10px;
+}
+
+.cs-card {
+  align-items: center;
+  background: linear-gradient(135deg, rgba(255, 255, 255, .055), rgba(255, 255, 255, .022));
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 10px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 54px;
+  padding: 10px 12px;
+  transition: border-color .18s ease, background .18s ease, transform .18s ease;
+}
+
+.cs-card:hover {
+  background: linear-gradient(135deg, rgba(127, 216, 255, .085), rgba(255, 255, 255, .025));
+  border-color: rgba(127, 216, 255, .25);
+  transform: translateY(-1px);
+}
+
+.cs-card-dot {
+  background: rgba(255, 255, 255, .24);
+  border: 3px solid rgba(255, 255, 255, .08);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .06);
+  flex: 0 0 auto;
+  height: 8px;
+  width: 8px;
+}
+
+.cs-card-dot.active {
+  background: #7fd8ff;
+  box-shadow: 0 0 14px rgba(127, 216, 255, .7);
+}
+
+.cs-card-content {
+  display: grid;
+  flex: 1;
+  gap: 5px;
+  min-width: 0;
+}
+
+.cs-card-title {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.cs-card strong,
+.cs-card small {
+  display: block;
+}
+
+.cs-card strong {
+  color: rgba(255, 255, 255, .88);
+  font-size: 12px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.cs-card small {
+  margin-top: 4px;
+}
+
+.cs-status-pill {
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 999px;
+  color: rgba(255, 255, 255, .48);
+  font-size: 9px;
+  padding: 2px 6px;
+}
+
+.cs-status-pill.active {
+  background: rgba(127, 216, 255, .12);
+  border-color: rgba(127, 216, 255, .28);
+  color: #bceeff;
+}
+
+.cs-card-actions,
+.cs-import-row {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.cs-card-actions {
+  flex: 0 0 auto;
+}
+
+.cs-import-panel {
+  background: rgba(0, 0, 0, .15);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 11px;
+  display: grid;
+  gap: 11px;
+  padding: 13px;
+}
+
+.cs-import-panel-head {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+}
+
+.cs-import-methods {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.cs-method-btn {
+  min-height: 34px;
+}
+
+.cs-method-btn.active,
+.cs-method-btn:hover {
+  background: rgba(127, 216, 255, .12);
+  border-color: rgba(127, 216, 255, .3);
+  color: #d9f5ff;
+}
+
+.cs-url-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.cs-url-row .cs-input {
+  flex: 1;
+}
+
+.cs-field-row {
+  display: grid;
+  gap: 6px;
+}
+
+.cs-field-label {
+  color: rgba(255, 255, 255, .54);
+  font-size: 10px;
+}
+
+.cs-field-label span {
+  color: rgba(255, 255, 255, .3);
+  margin-left: 4px;
+}
+
+.cs-btn {
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 5px;
+  color: rgba(255, 255, 255, .8);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  min-height: 28px;
+  padding: 6px 9px;
+}
+
+.cs-btn:hover {
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+}
+
+.cs-btn:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.cs-btn.primary {
+  background: rgba(127, 216, 255, .16);
+  border-color: rgba(127, 216, 255, .32);
+  color: #d9f5ff;
+}
+
+.cs-input,
+.cs-textarea {
+  background: rgba(0, 0, 0, .2);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 5px;
+  box-sizing: border-box;
+  color: rgba(255, 255, 255, .9);
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.cs-input:focus,
+.cs-textarea:focus {
+  border-color: rgba(127, 216, 255, .58);
+  outline: 2px solid rgba(127, 216, 255, .16);
+  outline-offset: 1px;
+}
+
+.cs-textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.cs-import-actions {
+  align-items: stretch;
+  display: flex;
+  gap: 9px;
+}
+
+.cs-feedback-panel {
+  align-items: center;
+  background: rgba(255, 255, 255, .035);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, .48);
+  display: flex;
+  flex: 1;
+  font-size: 10px;
+  gap: 7px;
+  line-height: 1.4;
+  min-width: 0;
+  padding: 8px 9px;
+}
+
+.cs-feedback-dot {
+  background: rgba(255, 255, 255, .32);
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 6px;
+  width: 6px;
+}
+
+.cs-feedback-success {
+  background: rgba(143, 214, 174, .08);
+  border-color: rgba(143, 214, 174, .3);
+  color: #b8efca;
+}
+
+.cs-feedback-success .cs-feedback-dot {
+  background: #8fd6ae;
+  box-shadow: 0 0 10px rgba(143, 214, 174, .65);
+}
+
+.cs-feedback-error {
+  background: rgba(239, 139, 139, .08);
+  border-color: rgba(239, 139, 139, .3);
+  color: #ffc0c0;
+}
+
+.cs-feedback-error .cs-feedback-dot {
+  background: #ef8b8b;
+}
+
+.cs-feedback-info {
+  background: rgba(127, 216, 255, .08);
+  border-color: rgba(127, 216, 255, .3);
+  color: #c8f2ff;
+}
+
+.cs-feedback-info .cs-feedback-dot {
+  background: #7fd8ff;
+  box-shadow: 0 0 10px rgba(127, 216, 255, .65);
+}
+
+.cs-import-submit {
+  flex: 0 0 auto;
+  min-width: 112px;
+}
+
+.mineradio-lx-feedback-error {
+  color: #ff9e9e;
+}
+
+.mineradio-lx-feedback {
+  border-left: 2px solid rgba(255, 255, 255, .24);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-top: 10px;
+  padding: 5px 8px;
+}
+
+.mineradio-lx-feedback-success {
+  border-color: #8fd6ae;
+  color: #b8efca;
+}
+
+.mineradio-lx-feedback-error {
+  border-color: #ef8b8b;
+}
+
+.mineradio-lx-user-api-panel .modal-mask {
+  z-index: 1000;
+}
+
+@media (max-width: 560px) {
+  .cs-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cs-card-actions,
+  .cs-url-row,
+  .cs-import-actions {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .cs-card-actions .cs-btn {
+    flex: 1;
+  }
+
+  .cs-url-row .cs-btn,
+  .cs-import-actions .cs-import-submit {
+    flex: 0 0 auto;
+  }
+
+  .cs-import-actions .cs-feedback-panel {
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mineradio-lx-user-api-panel * {
+    transition: none !important;
+  }
+}

@@ -999,6 +999,81 @@ async function handleSpotifyRecommendations(limit) {
   };
 }
 
+// Spotify 没有公开的"热歌榜"端点，这里读取官方"Global Top 50"编辑歌单
+// （spotify:playlist:37i9dQZEVXbMDoHDwVN2tF）作为对应平台热歌榜。
+const SPOTIFY_GLOBAL_TOP50_PLAYLIST_ID = '37i9dQZEVXbMDoHDwVN2tF';
+
+async function handleSpotifyTop(limit) {
+  const limitNum = Number(limit);
+  const hasLimit = Number.isFinite(limitNum) && limitNum > 0;
+  const target = hasLimit ? Math.max(1, Math.min(Math.floor(limitNum), 50)) : 50;
+  const status = getSpotifyConfig();
+  try {
+    const json = await spotifyGet('/v1/playlists/' + SPOTIFY_GLOBAL_TOP50_PLAYLIST_ID + '/tracks', {
+      limit: target,
+      offset: 0,
+      market: status.market,
+    }, { timeoutMs: 12000 });
+    const items = json && Array.isArray(json.items) ? json.items : [];
+    const songs = dedupeSpotifySongs(items.map((item, index) => mapSpotifyTrack(item && item.track, index, 'global-top-50')).filter(Boolean)).slice(0, target);
+    return {
+      provider: 'spotify',
+      loggedIn: true,
+      name: 'Global Top 50',
+      songs,
+      provenance: 'spotify-web-api',
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    console.warn('[SpotifyTop]', err && err.message);
+    return {
+      provider: 'spotify',
+      loggedIn: false,
+      songs: [],
+      name: 'Global Top 50',
+      provenance: 'spotify-web-api',
+      error: String((err && err.code) || (err && err.message) || 'SPOTIFY_TOP_FAILED'),
+      message: '连接 Spotify 后可读取全球热歌榜，未使用关键词搜索替代。',
+      updatedAt: Date.now(),
+    };
+  }
+}
+
+async function handleSpotifyFeaturedPlaylists(limit) {
+  const limitNum = Number(limit);
+  const hasLimit = Number.isFinite(limitNum) && limitNum > 0;
+  const target = hasLimit ? Math.max(1, Math.min(Math.floor(limitNum), 50)) : 50;
+  const status = getSpotifyConfig();
+  try {
+    const json = await spotifyGet('/v1/browse/featured-playlists', {
+      country: status.market,
+      locale: 'zh_CN',
+      limit: target,
+      offset: 0,
+    }, { timeoutMs: 12000 });
+    const items = json && json.playlists && Array.isArray(json.playlists.items) ? json.playlists.items : [];
+    const playlists = items.map(item => mapSpotifyPlaylist(item, {})).filter(Boolean).slice(0, target);
+    return {
+      provider: 'spotify',
+      loggedIn: true,
+      playlists,
+      provenance: 'spotify-web-api',
+      updatedAt: Date.now(),
+    };
+  } catch (err) {
+    console.warn('[SpotifyFeaturedPlaylists]', err && err.message);
+    return {
+      provider: 'spotify',
+      loggedIn: false,
+      playlists: [],
+      provenance: 'spotify-web-api',
+      error: String((err && err.code) || (err && err.message) || 'SPOTIFY_PLAYLISTS_FAILED'),
+      message: '连接 Spotify 后可读取编辑精选歌单，未使用关键词搜索替代。',
+      updatedAt: Date.now(),
+    };
+  }
+}
+
 function mapSpotifyPlaylist(item, profile) {
   item = item || {};
   const id = normalizeText(item.id);
@@ -1453,6 +1528,8 @@ module.exports = {
   handleSpotifyStatus,
   handleSpotifySearch,
   handleSpotifyRecommendations,
+  handleSpotifyTop,
+  handleSpotifyFeaturedPlaylists,
   handleSpotifyUserPlaylists,
   handleSpotifyPlaylistTracks,
   handleSpotifyAlbumDetail,

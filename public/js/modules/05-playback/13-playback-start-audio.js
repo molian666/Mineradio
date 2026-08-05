@@ -1,3 +1,86 @@
+/* mineradio-lx-addon: playback-entry-bridge main playback */
+function mineradioLxResolveImportedSong(song, quality) {
+  if (!window.mineradioUserApi || typeof window.mineradioUserApi.resolveSongUrl !== 'function') return Promise.resolve(null);
+  var requestedQuality = quality;
+  var supportedProviders = ['netease', 'kugou', 'qq'];
+  var providerToLxKey = { netease: 'wy', kugou: 'kg', qq: 'tx' };
+  function providerKeyForSong(value) {
+    var raw = String((value && (value.provider || value.source)) || '').trim().toLowerCase();
+    if (raw === 'wy') return 'netease';
+    if (raw === 'tx') return 'qq';
+    if (raw === 'kg') return 'kugou';
+    return supportedProviders.indexOf(raw) >= 0 ? raw : 'unknown';
+  }
+  function remainingProviders(originalProvider) {
+    var current = providerKeyForSong({ provider: originalProvider });
+    return supportedProviders.filter(function (provider) { return current === 'unknown' || provider !== current; });
+  }
+  function firstDefined() {
+    for (var index = 0; index < arguments.length; index += 1) {
+      var value = arguments[index];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return undefined;
+  }
+  function candidateSongForProvider(originalSong, provider, matchedSong) {
+    var candidate = Object.assign({}, originalSong || {});
+    var source = providerToLxKey[provider];
+    candidate.provider = provider;
+    candidate.source = source;
+    var songId = firstDefined(matchedSong && matchedSong.songId, matchedSong && matchedSong.id, originalSong && originalSong.songId, originalSong && originalSong.id);
+    var songmid = firstDefined(matchedSong && matchedSong.songmid, matchedSong && matchedSong.strMediaMid, songId);
+    var strMediaMid = firstDefined(matchedSong && matchedSong.strMediaMid, matchedSong && matchedSong.songmid, songId);
+    var hash = firstDefined(matchedSong && matchedSong.hash);
+    var albumId = firstDefined(matchedSong && matchedSong.albumId);
+    var duration = firstDefined(matchedSong && matchedSong.duration, matchedSong && matchedSong.interval);
+    if (songmid !== undefined) candidate.songmid = songmid;
+    if (strMediaMid !== undefined) candidate.strMediaMid = strMediaMid;
+    if (songId !== undefined) candidate.songId = songId;
+    if (hash !== undefined) candidate.hash = hash;
+    if (albumId !== undefined) candidate.albumId = albumId;
+    if (duration !== undefined) candidate.duration = duration;
+    return candidate;
+  }
+  function hasUrl(result) { return !!(result && (result.url || result.upstreamUrl)); }
+  function warnProviderFailure(provider, error) {
+    if (error && error.message) console.warn('[Mineradio-LX UserApi] imported playback ' + provider + ' unavailable:', error.message);
+  }
+  return (async function () {
+    var originalProvider = providerKeyForSong(song);
+    var originalLxProviderKey = providerToLxKey[originalProvider];
+    try {
+      var originalResult = await window.mineradioUserApi.resolveSongUrl(song, requestedQuality, { provider: originalLxProviderKey });
+      if (hasUrl(originalResult)) return originalResult;
+    } catch (error) {
+      warnProviderFailure(originalProvider, error);
+    }
+    var providers = remainingProviders(originalProvider);
+    var matches = {};
+    for (var searchIndex = 0; searchIndex < providers.length; searchIndex += 1) {
+      var provider = providers[searchIndex];
+      try {
+        var match = await findControlSourceMatchResult(song, provider);
+        if (match && match.song) matches[provider] = match.song;
+      } catch (error) {
+        warnProviderFailure(provider, error);
+      }
+    }
+    for (var resolveIndex = 0; resolveIndex < providers.length; resolveIndex += 1) {
+      var candidateProvider = providers[resolveIndex];
+      var matchedSong = matches[candidateProvider];
+      if (!matchedSong) continue;
+      var candidate = candidateSongForProvider(song, candidateProvider, matchedSong);
+      var lxProviderKey = providerToLxKey[candidateProvider];
+      try {
+        var candidateResult = await window.mineradioUserApi.resolveSongUrl(candidate, requestedQuality, { provider: lxProviderKey });
+        if (hasUrl(candidateResult)) return candidateResult;
+      } catch (error) {
+        warnProviderFailure(candidateProvider, error);
+      }
+    }
+    return null;
+  })();
+}
 function albumGaplessSongKey(song) {
   if (!song) return '';
   if (song.__albumGaplessKey) return String(song.__albumGaplessKey);
@@ -552,6 +635,14 @@ async function retryNeteaseSourceMatchPlayback(song, data, idx, token, opts, req
 }
 
 async function resolveAlbumGaplessPlaybackData(song) {
+  if (typeof mineradioLxResolveImportedSong === 'function') {
+    try {
+      var importedGapless = await mineradioLxResolveImportedSong(song, getProviderPlaybackQuality(songProviderKey(song)));
+      if (importedGapless && importedGapless.url) return importedGapless;
+    } catch (error) {
+      console.warn('[Mineradio-LX UserApi] gapless resolve failed:', error && error.message || error);
+    }
+  }
   if (!song || song.type === 'local' || song.source === 'local' || song.localUrl) return null;
   var playbackProvider = normalizePlaybackProvider(songProviderKey(song));
   var requestedQuality = normalizePlaybackQualityForProvider(getProviderPlaybackQuality(playbackProvider), playbackProvider);
@@ -1114,7 +1205,13 @@ async function playQueueAt(idx, opts) {
       }
       var qualityParam = '&quality=' + encodeURIComponent(requestedQuality);
       var data;
-      if (albumGaplessHandoff) {
+      var importedPlaybackData = null;
+      if (!albumGaplessHandoff && !opts.preResolvedPlaybackData && typeof mineradioLxResolveImportedSong === 'function') {
+        importedPlaybackData = await mineradioLxResolveImportedSong(song, requestedQuality);
+      }
+      if (importedPlaybackData && importedPlaybackData.url) {
+        data = importedPlaybackData;
+      } else if (albumGaplessHandoff) {
         data = opts.preloadedData;
       } else if (opts.preResolvedPlaybackData && opts.preResolvedPlaybackData.url) {
         data = opts.preResolvedPlaybackData;
@@ -1150,13 +1247,14 @@ async function playQueueAt(idx, opts) {
       ) {
         return settleExpiredSourceFallbackPlayback(idx, token, opts);
       }
+      var isImportedPlayback = !!(data && data.sourceKind === 'lx-user-api');
       if (data) {
         song.resolvedPlaybackProvider = playbackProvider;
         song.playbackLevel = data.level || song.playbackLevel || '';
         if (!data.sourceMatch) song.playbackSource = data.source || data.provider || song.playbackSource || '';
         if (playbackProvider === 'netease' && !data.sourceMatch) clearNeteaseSourceMatchMetadata(song);
-        song.trial = !!(song.trial || data.trial);
-        song.vipRequired = !!(
+        if (!isImportedPlayback) song.trial = !!(song.trial || data.trial);
+        if (!isImportedPlayback) song.vipRequired = !!(
           song.vipRequired ||
           data.trial ||
           data.needVip ||

@@ -16,6 +16,7 @@ var cuefieldFeedbackState = { context: null, timer: 0, submitted: false };
 var CUEFIELD_AUTOMIX_NORMAL_START_SETTLE_MS = 4200;
 var CUEFIELD_AUTOMIX_HANDOFF_SETTLE_MS = 5200;
 
+/* mineradio-lx-addon: playback-entry-bridge cuefield automix */
 function readCuefieldAutoMixPreference() {
   try { return localStorage.getItem(CUEFIELD_AUTOMIX_STORE_KEY) === '1'; } catch (_) { return false; }
 }
@@ -62,6 +63,21 @@ function updateCuefieldAutoMixUi(status) {
 }
 
 function cuefieldAutoMixAudioDescriptor(song) {
+  if (typeof mineradioLxResolveImportedSong === 'function') {
+    return Promise.resolve(mineradioLxResolveImportedSong(song, getProviderPlaybackQuality(songProviderKey(song)))).then(function (importedDescriptor) {
+      if (importedDescriptor && (importedDescriptor.url || importedDescriptor.upstreamUrl)) {
+        var importedUrl = importedDescriptor.url || importedDescriptor.upstreamUrl;
+        return { proxyUrl: importedUrl, playbackData: importedDescriptor };
+      }
+      return cuefieldAutoMixAudioDescriptorNative(song);
+    }).catch(function (error) {
+      console.warn('[Mineradio-LX UserApi] Cuefield resolve failed:', error && error.message || error);
+      return cuefieldAutoMixAudioDescriptorNative(song);
+    });
+  }
+  return cuefieldAutoMixAudioDescriptorNative(song);
+}
+function cuefieldAutoMixAudioDescriptorNative(song) {
   var key = cuefieldSongKey(song);
   var cached = key && cuefieldAudioDescriptorCache[key];
   if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached);

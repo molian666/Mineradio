@@ -351,6 +351,7 @@ function findNextBeatPrefetchIndex(fromIdx, seen) {
   return -1;
 }
 
+/* mineradio-lx-addon: playback-entry-bridge beat prefetch */
 function normalizeBeatPrefetchState(state) {
   state = state || {};
   return {
@@ -360,6 +361,14 @@ function normalizeBeatPrefetchState(state) {
 }
 
 async function fetchBeatPrefetchAudioUrl(song) {
+  if (typeof mineradioLxResolveImportedSong === 'function') {
+    try {
+      var importedPrefetch = await mineradioLxResolveImportedSong(song, getProviderPlaybackQuality(songProviderKey(song)));
+      if (importedPrefetch && (importedPrefetch.url || importedPrefetch.upstreamUrl)) return importedPrefetch.url || importedPrefetch.upstreamUrl;
+    } catch (error) {
+      console.warn('[Mineradio-LX UserApi] beat prefetch resolve failed:', error && error.message || error);
+    }
+  }
   if (!song) return null;
   if (typeof resolveAlbumGaplessPlaybackData === 'function') {
     var resolved = await resolveAlbumGaplessPlaybackData(song);

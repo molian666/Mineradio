@@ -470,6 +470,7 @@ function renderQueuePanel(opts) {
       '<button class="' + (isSongLiked(song) ? 'liked' : '') + '" onclick="event.stopPropagation();toggleLikeQueueIndex(' + i + ')" title="' + (isSongLiked(song) ? '取消红心' : '红心喜欢') + '">' + heartIconSvg() + '</button>' +
       '<button class="queue-next" onclick="event.stopPropagation();queueIndexNext(' + i + ')" title="下一首播放">下</button>' +
       '<button onclick="event.stopPropagation();collectQueueIndex(' + i + ')" title="收藏到歌单">' + playlistPlusIconSvg() + '</button>' +
+      '<button onclick="event.stopPropagation();downloadQueueIndex(' + i + ')" title="下载歌曲" aria-label="下载歌曲">' + downloadIconSvg() + '</button>' +
       '<button onclick="event.stopPropagation();removeFromQueue(' + i + ')" title="移除">×</button>' +
       '</div>' +
       '</div>';
@@ -527,8 +528,11 @@ function mergePlaylistCatalogRows(existing, incoming, provider) {
 }
 function rebuildUserPlaylistsFromCatalog(opts) {
   opts = opts || {};
-  userPlaylists = neteasePlaylists.concat(qqPlaylists, kugouPlaylists, qishuiPlaylists, spotifyPlaylists);
-  if (typeof applyUserPlaylistOrder === 'function') applyUserPlaylistOrder();
+  var allProviderRows = (neteasePlaylists || []).concat(qqPlaylists || [], kugouPlaylists || [], qishuiPlaylists || [], spotifyPlaylists || []);
+  userPlaylists = typeof playlistCatalogView === 'function'
+    ? playlistCatalogView(allProviderRows, !!(fx && fx.shelfMergeCollections))
+    : allProviderRows;
+  if (!(fx && fx.shelfMergeCollections) && typeof applyUserPlaylistOrder === 'function') applyUserPlaylistOrder();
   playlistCatalogRevision += 1;
   renderUserPlaylistsList({ animate: !!opts.animate, reset: !!opts.reset, preserveScroll: opts.preserveScroll !== false });
   if (emptyHomeActive) renderHomeDiscover();
@@ -595,6 +599,7 @@ function requestNextPlaylistCatalogPage(reason) {
     if (playlistCatalogSyncState !== root || !playlistCatalogHasPendingPages()) {
       root.loading = false;
       if (userPlaylists.length) renderUserPlaylistsList({ preserveScroll: true });
+      if (typeof scheduleMergedPlaylistCacheSync === 'function') scheduleMergedPlaylistCacheSync('catalog-background-complete');
       return;
     }
     if (root.timer) clearTimeout(root.timer);
@@ -605,6 +610,21 @@ function requestNextPlaylistCatalogPage(reason) {
   });
   return true;
 }
+async function restoreMergedPlaylistCatalogCache() {
+  if (!(fx && fx.shelfMergeCollections) || typeof loadMergedPlaylistCache !== 'function') return false;
+  var accountKey = currentMergedPlaylistAccountKey();
+  var snapshot = mergedPlaylistCacheRuntime.accountKey === String(accountKey || 'anonymous')
+    ? mergedPlaylistCacheRuntime.snapshot
+    : await loadMergedPlaylistCache(accountKey);
+  if (!snapshot || !snapshot.sources || !snapshot.sources.length) return false;
+  var sourceRows = snapshot.sources.map(function (source) { return Object.assign({}, source); });
+  userPlaylists = [buildMergedPlaylistRecord(sourceRows)];
+  playlistCatalogRevision += 1;
+  renderUserPlaylistsList({ animate: false, reset: true, preserveScroll: false });
+  if (emptyHomeActive) renderHomeDiscover();
+  scheduleShelfRebuild('merged-playlist-cache-restore', true);
+  return true;
+}
 async function refreshUserPlaylists(force) {
   if (!loginStatus.loggedIn && !qqLoginStatus.loggedIn && !kugouLoginStatus.loggedIn && !qishuiLoginStatus.loggedIn && !spotifyLoginStatus.loggedIn) {
     resetPlaylistPanelRenderLimit();
@@ -612,6 +632,11 @@ async function refreshUserPlaylists(force) {
     var podcastListLoggedOut = document.getElementById('podcast-list');
     if (podcastListLoggedOut) podcastListLoggedOut.innerHTML = '<div style="text-align:center;padding:14px 0;color:rgba(255,255,255,.28);font-size:11.5px">登录后显示我的播客</div>';
     return;
+  }
+  var restoredMergedCache = false;
+  if (fx && fx.shelfMergeCollections && (!userPlaylists.length || force)) {
+    try { restoredMergedCache = await restoreMergedPlaylistCatalogCache(); }
+    catch (e) { console.warn('[MergedPlaylistCacheRestore]', e); }
   }
   var catalogNeedsNewProvider = playlistCatalogSyncState.loading && ['netease', 'qq', 'kugou', 'qishui', 'spotify'].some(function (provider) {
     var state = playlistCatalogSyncState.providers && playlistCatalogSyncState.providers[provider];
@@ -621,14 +646,14 @@ async function refreshUserPlaylists(force) {
     if (userPlaylists.length) renderUserPlaylistsList({ animate: isPlaylistPanelVisibleForRender(), preserveScroll: true });
     return;
   }
-  if (!force && (userPlaylists.length || myPodcastCollections.length)) {
+  if (!force && !restoredMergedCache && (userPlaylists.length || myPodcastCollections.length)) {
     var cachedAnimate = isPlaylistPanelVisibleForRender();
     renderUserPlaylistsList({ animate: cachedAnimate, preserveScroll: true });
     renderMyPodcastCollections({ animate: cachedAnimate });
     return;
   }
   var $pl = document.getElementById('pl-list');
-  if ($pl) {
+  if ($pl && !restoredMergedCache) {
     $pl.innerHTML = miniQueueSkeleton();
     if (window.gsap) animateListItems($pl, '.mini-queue-skeleton', { x: 0, y: 6, stagger: 0.018, duration: 0.18, limit: 3 });
   }
@@ -650,7 +675,7 @@ async function refreshUserPlaylists(force) {
     };
   });
   if (force) {
-    userPlaylists = [];
+    if (!restoredMergedCache) userPlaylists = [];
     playlistCatalogRevision += 1;
   }
   var firstPageTasks = Object.keys(playlistCatalogSyncState.providers).filter(playlistCatalogProviderLoggedIn).map(function (provider) {
@@ -667,5 +692,6 @@ async function refreshUserPlaylists(force) {
   if (playlistCatalogSyncState.token !== token) return;
   playlistCatalogSyncState.loading = playlistCatalogHasPendingPages();
   if (userPlaylists.length) renderUserPlaylistsList({ animate: isPlaylistPanelVisibleForRender(), preserveScroll: true });
+  if (!playlistCatalogSyncState.loading && typeof scheduleMergedPlaylistCacheSync === 'function') scheduleMergedPlaylistCacheSync('catalog-first-pages');
   if (playlistCatalogSyncState.loading) requestNextPlaylistCatalogPage('after-first-pages');
 }

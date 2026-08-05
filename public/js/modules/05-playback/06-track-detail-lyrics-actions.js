@@ -236,6 +236,7 @@ function renderAlbumSongList(songs) {
       '<button class="artist-song-action collect" type="button" title="收藏到歌单" aria-label="收藏到歌单" onclick="event.stopPropagation();collectAlbumDetailSong(' + i + ')">' + artistCollectTrayIconSvg() + '</button>' +
       '<button class="artist-song-action next" type="button" title="下一首播放" aria-label="下一首播放" onclick="event.stopPropagation();queueAlbumDetailSongNext(' + i + ')">' + artistNextPlusIconSvg() + '</button>' +
       '</div>';
+    actionsHtml = actionsHtml.replace('</div>', '<button class="artist-song-action download" type="button" title="下载歌曲" aria-label="下载歌曲" onclick="event.stopPropagation();downloadDetailSong(detailAlbumSongs[' + i + '])">' + downloadIconSvg() + '</button></div>');
     return '<div class="artist-song-item" onclick="playAlbumDetailSong(' + i + ')">' +
       '<div class="artist-song-rank">' + String(i + 1).padStart(2, '0') + '</div>' +
       coverHtml +
@@ -397,6 +398,7 @@ function renderArtistSongList(songs) {
       '<button class="artist-song-action collect" type="button" title="收藏到歌单" aria-label="收藏到歌单" onclick="event.stopPropagation();collectArtistDetailSong(' + i + ')">' + artistCollectTrayIconSvg() + '</button>' +
       '<button class="artist-song-action next" type="button" title="下一首播放" aria-label="下一首播放" onclick="event.stopPropagation();queueArtistDetailSongNext(' + i + ')">' + artistNextPlusIconSvg() + '</button>' +
       '</div>';
+    actionsHtml = actionsHtml.replace('</div>', '<button class="artist-song-action download" type="button" title="下载歌曲" aria-label="下载歌曲" onclick="event.stopPropagation();downloadDetailSong(detailArtistSongs[' + i + '])">' + downloadIconSvg() + '</button></div>');
     return '<div class="artist-song-item" onclick="playArtistDetailSong(' + i + ')">' +
       '<div class="artist-song-rank">' + String(i + 1).padStart(2, '0') + '</div>' +
       coverHtml +
@@ -618,6 +620,7 @@ function openTrackDetailModal(type, songOverride) {
       (getCustomCoverForSong(song) ? '<span class="detail-chip">自定义封面</span>' : '') +
       (hasCustomLyricForSong(song) ? '<span class="detail-chip">自定义歌词</span>' : '') +
       '</div>' +
+      '<div class="detail-actions"><button class="detail-action-toggle" type="button" onclick="downloadDetailSong(detailCommentSong)">下载歌曲</button></div>' +
       '<div class="detail-section"><div class="detail-section-head"><div class="detail-section-title">' + detailCommentTitle + '</div></div>' +
       renderDetailCommentComposer(commentConfig) +
       '<div id="song-comments">' + (detailCanLoadComments ? '<div class="detail-loading">正在载入评论...</div>' : '<div class="detail-empty">' + detailEmptyText + '</div>') + '</div></div>';
@@ -1297,6 +1300,9 @@ function artistCollectTrayIconSvg() {
 function artistNextPlusIconSvg() {
   return '<svg fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5.5v13"/><path d="M5.5 12h13"/></svg>';
 }
+function downloadIconSvg() {
+  return '<svg fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>';
+}
 function songActionHtml(kind, source, index, song) {
   var liked = isSongLiked(song);
   if (kind === 'like') {
@@ -1417,6 +1423,11 @@ async function toggleLikeSong(song) {
     if (r && (r.error || r.success === false)) throw new Error(r.error || r.message || 'LIKE_FAILED');
     likedSongMap[stateKey] = r && r.liked != null ? !!r.liked : next;
     showToast(next ? '已加入红心喜欢' : '已取消红心');
+    // 红心/取消红心会改变对应平台"我的喜欢"歌单内容；若该歌单被纳入
+    // 合并歌单，失效缓存并后台重同步，保证下次加载合并歌单包含最新歌曲。
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty(next ? 'like-toggle' : 'unlike-toggle').catch(function () { });
+    }
   } catch (err) {
     likedSongMap[stateKey] = !next;
     var errorText = String(err && err.message || '');

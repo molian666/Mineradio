@@ -78,12 +78,16 @@ test('daily recommendation viewport range exposes every index while keeping each
 });
 
 test('virtualized daily cards preserve absolute indexes and full-queue playback', () => {
+  const virtualWindow = namedFunctionSource(dashboardScript, 'renderHomePlatformVirtualWindow');
+  assert.ok(virtualWindow, 'expected renderHomePlatformVirtualWindow()');
+  assert.match(virtualWindow, /for \(var index = range\.start; index < range\.end; index \+= 1\)/);
+  assert.match(virtualWindow, /homePlatformRecommendationCard\(opts\.kind, index, items\[index\]/);
+  assert.match(virtualWindow, /homePlatformRecommendationSpacer\(range\.topRows/);
+  assert.match(virtualWindow, /homePlatformRecommendationSpacer\(range\.bottomRows/);
   const renderWindow = namedFunctionSource(dashboardScript, 'renderHomePlatformDailyWindow');
   assert.ok(renderWindow, 'expected renderHomePlatformDailyWindow()');
-  assert.match(renderWindow, /for \(var index = range\.start; index < range\.end; index \+= 1\)/);
-  assert.match(renderWindow, /homePlatformRecommendationCard\('netease-song', index, songs\[index\]/);
-  assert.match(renderWindow, /homePlatformRecommendationSpacer\(range\.topRows/);
-  assert.match(renderWindow, /homePlatformRecommendationSpacer\(range\.bottomRows/);
+  assert.match(renderWindow, /renderHomePlatformVirtualWindow/);
+  assert.match(renderWindow, /netease-song/);
 
   const playDaily = namedFunctionSource(homeActionsScript, 'playHomeDaily');
   const playSong = namedFunctionSource(homeActionsScript, 'playHomeSong');
@@ -94,8 +98,8 @@ test('virtualized daily cards preserve absolute indexes and full-queue playback'
 
 test('daily viewport updates are scroll-driven and animation-frame throttled', () => {
   const bind = namedFunctionSource(dashboardScript, 'bindHomePlatformRecommendationControls');
-  const schedule = namedFunctionSource(dashboardScript, 'scheduleHomePlatformDailyWindowRender');
-  assert.match(bind, /addEventListener\(\s*'scroll'\s*,\s*scheduleHomePlatformDailyWindowRender/);
+  const schedule = namedFunctionSource(dashboardScript, 'scheduleHomePlatformVirtualRender');
+  assert.match(bind, /addEventListener\(\s*'scroll'\s*,\s*scheduleHomePlatformVirtualRender/);
   assert.match(bind, /\{\s*passive:\s*true\s*\}/);
   assert.match(schedule, /requestAnimationFrame\s*\(/);
   assert.match(schedule, /renderHomePlatformDailyWindow\s*\(\s*false\s*\)/);

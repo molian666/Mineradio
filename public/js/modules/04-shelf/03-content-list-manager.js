@@ -14,6 +14,7 @@ function makeContentListManager() {
   var playlistTitle = '';
   var contentKind = 'playlist';
   var contentSource = null;
+  var contentPager = null;
   var contentNextOffset = 0;
   var contentTotalCount = 0;
   var contentHasMore = false;
@@ -245,6 +246,7 @@ function makeContentListManager() {
 
   function contentPageUrl(offset) {
     if (!contentSource) return '';
+    if (contentSource.provider === MERGED_PLAYLIST_PROVIDER) return '';
     var limit = PLAYLIST_LAZY_BATCH_SIZE;
     if (contentSource.provider === 'qq') {
       return '/api/qq/playlist/tracks?id=' + encodeURIComponent(contentSource.id) + '&limit=' + limit + '&offset=' + Math.max(0, offset || 0);
@@ -267,12 +269,14 @@ function makeContentListManager() {
   async function loadMoreContentRows(reason) {
     if (!open || contentLoadingMore || !contentHasMore || !contentSource) return false;
     var url = contentPageUrl(contentNextOffset);
-    if (!url) return false;
+    if (!url && (!contentSource || contentSource.provider !== MERGED_PLAYLIST_PROVIDER)) return false;
     var token = requestToken;
     contentLoadingMore = true;
     panelDirty = true;
     try {
-      var r = await apiJson(url);
+      var r = contentSource.provider === MERGED_PLAYLIST_PROVIDER
+        ? await fetchMergedPlaylistPage(contentSource.pager, PLAYLIST_LAZY_BATCH_SIZE)
+        : await apiJson(url);
       if (!open || token !== requestToken) return false;
       var tracks = r && r.tracks || [];
       var before = allTracks.length;
@@ -280,6 +284,7 @@ function makeContentListManager() {
       contentNextOffset = Math.max(contentNextOffset + tracks.length, Number(r && r.nextOffset) || (contentNextOffset + tracks.length));
       var total = Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0;
       if (total) contentTotalCount = Math.max(contentTotalCount || 0, total);
+      contentSource.partial = contentSource.partial || !!(r && r.partial);
       contentHasMore = !!(r && r.hasMore);
       if (!added && (!tracks.length || allTracks.length === before)) contentHasMore = false;
       panelDirty = true;
@@ -648,6 +653,7 @@ function makeContentListManager() {
       panelDrawAt = -10;
       rowDrawAt = -10;
       contentSource = null;
+      contentPager = null;
       contentNextOffset = 0;
       contentTotalCount = Number(fromCard && fromCard.item && fromCard.item.trackCount) || 0;
       contentHasMore = false;
@@ -700,21 +706,26 @@ function makeContentListManager() {
         console.warn('[ShelfContentLoadingRender]', playlistId, renderLoadingErr);
       }
       var podcastCollectionKey = String(playlistId || '').indexOf('podcast:') === 0 ? String(playlistId).slice(8) : '';
+      var mergedPlaylistId = String(playlistId || '').indexOf('merged:') === 0 ? String(playlistId).slice(7) : '';
       var qqPlaylistId = String(playlistId || '').indexOf('qq:') === 0 ? String(playlistId).slice(3) : '';
       var kugouPlaylistId = String(playlistId || '').indexOf('kugou:') === 0 ? String(playlistId).slice(6) : '';
       var qishuiPlaylistId = String(playlistId || '').indexOf('qishui:') === 0 ? String(playlistId).slice(7) : '';
       var spotifyPlaylistId = String(playlistId || '').indexOf('spotify:') === 0 ? String(playlistId).slice(8) : '';
       contentKind = podcastCollectionKey ? 'podcast' : 'playlist';
       contentSource = podcastCollectionKey ? null : {
-        provider: qqPlaylistId ? 'qq' : (kugouPlaylistId ? 'kugou' : (qishuiPlaylistId ? 'qishui' : (spotifyPlaylistId ? 'spotify' : 'netease'))),
-        id: qqPlaylistId || kugouPlaylistId || qishuiPlaylistId || spotifyPlaylistId || playlistId
+        provider: mergedPlaylistId ? MERGED_PLAYLIST_PROVIDER : (qqPlaylistId ? 'qq' : (kugouPlaylistId ? 'kugou' : (qishuiPlaylistId ? 'qishui' : (spotifyPlaylistId ? 'spotify' : 'netease')))),
+        id: mergedPlaylistId || qqPlaylistId || kugouPlaylistId || qishuiPlaylistId || spotifyPlaylistId || playlistId,
+        pager: mergedPlaylistId ? createMergedPlaylistPagerForRecord(mergedPlaylistRecordForId(mergedPlaylistId)) : null
       };
+      contentPager = contentSource && contentSource.pager;
       // 拉取歌单/播客集合
       var r = null;
       try {
         r = podcastCollectionKey
           ? await apiJson('/api/podcast/my/items?key=' + encodeURIComponent(podcastCollectionKey) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE)
-          : (qqPlaylistId
+          : (mergedPlaylistId
+            ? await fetchMergedPlaylistPage(contentSource.pager, PLAYLIST_LAZY_BATCH_SIZE)
+            : (qqPlaylistId
             ? await apiJson('/api/qq/playlist/tracks?id=' + encodeURIComponent(qqPlaylistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0')
             : (kugouPlaylistId
               ? await apiJson('/api/kugou/playlist/tracks?id=' + encodeURIComponent(kugouPlaylistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0')
@@ -722,7 +733,7 @@ function makeContentListManager() {
                 ? await apiJson('/api/qishui/playlist/tracks?id=' + encodeURIComponent(qishuiPlaylistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0')
                 : (spotifyPlaylistId
                   ? await apiJson('/api/spotify/playlist/tracks?id=' + encodeURIComponent(spotifyPlaylistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0')
-                  : await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0')))));
+                  : await apiJson('/api/playlist/tracks?id=' + encodeURIComponent(playlistId) + '&limit=' + PLAYLIST_LAZY_BATCH_SIZE + '&offset=0'))))));
       } catch (e) {
         if (!open || token !== requestToken) return;
         console.warn('[ShelfContentLoadApi]', playlistId, e);
@@ -755,6 +766,7 @@ function makeContentListManager() {
         if (!podcastCollectionKey) {
           contentNextOffset = Number(r && r.nextOffset) || allTracks.length;
           contentTotalCount = Math.max(contentTotalCount || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0);
+          contentSource.partial = !!(r && r.partial);
           contentHasMore = !!(r && r.hasMore);
         }
         centerTarget = 0; centerSmooth = 0;
@@ -782,6 +794,7 @@ function makeContentListManager() {
       allTracks = [];
       contentKind = 'playlist';
       contentSource = null;
+      contentPager = null;
       contentNextOffset = 0;
       contentTotalCount = 0;
       contentHasMore = false;
@@ -1050,6 +1063,8 @@ function makeContentListManager() {
         total: contentTotalCount,
         nextOffset: contentNextOffset,
         hasMore: contentHasMore,
+        mergedPager: contentSource && contentSource.pager,
+        partial: !!(contentSource && contentSource.partial),
         preserveHomeState: true
       }).catch(function (e) { console.warn('[ContentPlayRow]', e); });
       // 关闭内容框
