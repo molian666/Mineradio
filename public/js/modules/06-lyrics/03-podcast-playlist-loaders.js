@@ -115,6 +115,21 @@ function mergedPlaylistRecordForId(id) {
     return playlist && playlist.provider === MERGED_PLAYLIST_PROVIDER && String(playlist.id || '') === key;
   }) || null;
 }
+// 合并歌单同步/恢复后，把目录里合并歌单的显示数量更新为去重后的真实数，
+// 避免打开后目录仍显示"各平台 trackCount 之和"的未去重预估（如 510），
+// 而歌单内实际只有 190 首的不一致。
+function updateMergedPlaylistCatalogCount(snapshot) {
+  if (!snapshot) return;
+  var total = Math.max(0, Number(snapshot.total) || (snapshot.tracks || []).length || 0);
+  if (!total) return;
+  var record = mergedPlaylistRecordForId(MERGED_PLAYLIST_ID);
+  if (!record || Number(record.trackCount) === total) return;
+  record.trackCount = total;
+  if (typeof playlistCatalogRevision !== 'undefined') playlistCatalogRevision += 1;
+  if (typeof renderUserPlaylistsList === 'function') {
+    try { renderUserPlaylistsList({ animate: false, preserveScroll: true }); } catch (e) { }
+  }
+}
 function mergedPlaylistSourcePage(source, offset, limit, signal) {
   var requestOptions = signal ? { signal: signal } : { timeoutMs: 16000 };
   return apiJson(playlistTracksEndpoint(source.provider, source.id, { offset: offset, limit: limit }), requestOptions);
@@ -138,6 +153,7 @@ async function prepareMergedPlaylistCache(record, options) {
     if (previous && !forceSync) {
       mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
       mergedPlaylistCacheRuntime.snapshot = previous;
+      updateMergedPlaylistCatalogCount(previous);
       console.log('[MergedPlaylistCache] cache-hit', accountKey, 'tracks=', (previous.tracks || []).length, 'partial=', !!previous.partial);
       // partial（部分平台上次拉取失败）时立即后台重试补全；否则等目录
       // 翻页完成后再后台同步，避免与目录加载抢带宽。
@@ -166,6 +182,7 @@ async function prepareMergedPlaylistCache(record, options) {
     if (result && result.snapshot) {
       mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
       mergedPlaylistCacheRuntime.snapshot = result.snapshot;
+      updateMergedPlaylistCatalogCount(result.snapshot);
     }
     return result;
   })();

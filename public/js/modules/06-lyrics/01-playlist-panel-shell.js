@@ -617,6 +617,11 @@ async function restoreMergedPlaylistCatalogCache() {
     ? mergedPlaylistCacheRuntime.snapshot
     : await loadMergedPlaylistCache(accountKey);
   if (!snapshot || !snapshot.sources || !snapshot.sources.length) return false;
+  // 恢复缓存时同步写入 runtime，使 buildMergedPlaylistRecord 能用去重后的
+  // 真实歌曲数（snapshot.total）替代"各平台 trackCount 之和"的未去重预估，
+  // 避免目录显示 510 而歌单内实际只有 190 这种不一致。
+  mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
+  mergedPlaylistCacheRuntime.snapshot = snapshot;
   var sourceRows = snapshot.sources.map(function (source) { return Object.assign({}, source); });
   userPlaylists = [buildMergedPlaylistRecord(sourceRows)];
   playlistCatalogRevision += 1;

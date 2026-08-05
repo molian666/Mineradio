@@ -527,6 +527,11 @@ function buildMergedPlaylistRecord(sourcePlaylists) {
     };
   });
   var trackCount = sources.reduce(function (sum, playlist) { return sum + playlist.trackCount; }, 0);
+  // 合并歌单已同步过（缓存存在且账号/源一致）时，目录数量显示去重后的
+  // 真实歌曲数，避免"各平台 trackCount 之和"（未去重预估，如 273）与歌单
+  // 内实际数量（去重后，如 250）不一致。
+  var cachedCount = mergedPlaylistCachedTrackCountFor(sourcePlaylists);
+  if (cachedCount > 0) trackCount = cachedCount;
   return {
     provider: MERGED_PLAYLIST_PROVIDER,
     id: MERGED_PLAYLIST_ID,
@@ -538,6 +543,22 @@ function buildMergedPlaylistRecord(sourcePlaylists) {
     creator: sources.length + ' 个平台',
     sources: sources,
   };
+}
+
+function mergedPlaylistCachedTrackCountFor(sourcePlaylists) {
+  var snapshot = mergedPlaylistCacheRuntime.snapshot;
+  if (!snapshot || !Array.isArray(snapshot.sources)) return 0;
+  if (mergedPlaylistCacheRuntime.accountKey !== String(currentMergedPlaylistAccountKey() || '')) return 0;
+  var rows = (sourcePlaylists || []).filter(function (playlist) {
+    return playlist && playlist.provider && playlist.id != null;
+  });
+  if (!rows.length || rows.length !== snapshot.sources.length) return 0;
+  var snapshotKeys = Object.create(null);
+  (snapshot.sources || []).forEach(function (source) { snapshotKeys[mergedSourceKey(source)] = true; });
+  for (var i = 0; i < rows.length; i += 1) {
+    if (!snapshotKeys[mergedSourceKey(rows[i])]) return 0;
+  }
+  return Math.max(0, Number(snapshot.total) || (snapshot.tracks || []).length || 0);
 }
 
 function playlistCatalogView(sourcePlaylists, enabled) {
