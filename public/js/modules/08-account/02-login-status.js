@@ -331,12 +331,10 @@ function applyKugouPlaybackStatusEvidence(info) {
   renderUserBtn();
   return true;
 }
-function qqPlaybackShowsMemberAccess(info, song) {
-  // A playable URL plus a song-level VIP hint proves that this request worked;
-  // it does not prove the account owns a subscription.
-  return false;
-}
-function applyQQPlaybackStatusEvidence(info, song) {
+// QQ VIP 资格安全哨兵（qq-vip-entitlement.test.js 锁定）：可播放 URL 加歌曲级
+// VIP 提示只证明请求成功，不证明账号拥有订阅。此函数必须恒返回 false，
+// 防止未来误把"能播"当作"已购会员"。当前无调用方，保留作为防御性契约。
+function qqPlaybackShowsMemberAccess() {
   return false;
 }
 async function refreshKugouLoginStatus() {
@@ -372,8 +370,18 @@ async function refreshKugouLoginStatus() {
 function startKugouLoginStatusAutoRefresh() {
   if (kugouLoginAutoRefreshTimer) clearInterval(kugouLoginAutoRefreshTimer);
   kugouLoginAutoRefreshTimer = setInterval(function () {
+    if (document.hidden) return; // 后台不轮询，可见时 focus/visibility 补刷
     refreshKugouLoginStatus().catch(function (e) { console.warn('Kugou login auto refresh failed:', e); });
   }, 45000);
+  if (startKugouLoginStatusAutoRefresh._boundFocusRefresh) return;
+  startKugouLoginStatusAutoRefresh._boundFocusRefresh = true;
+  function refreshKugouOnVisible() {
+    if (document.hidden) return;
+    if (!kugouLoginStatus.loggedIn && !kugouLoginWasLoggedIn) return;
+    refreshKugouLoginStatus().catch(function (e) { console.warn('Kugou login foreground refresh failed:', e); });
+  }
+  window.addEventListener('focus', function () { refreshKugouOnVisible(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshKugouOnVisible(); });
 }
 
 function normalizeQishuiLoginStatus(info) {
@@ -437,8 +445,18 @@ async function refreshQishuiLoginStatus() {
 function startQishuiLoginStatusAutoRefresh() {
   if (qishuiLoginAutoRefreshTimer) clearInterval(qishuiLoginAutoRefreshTimer);
   qishuiLoginAutoRefreshTimer = setInterval(function () {
+    if (document.hidden) return; // 后台不轮询，可见时 focus/visibility 补刷
     refreshQishuiLoginStatus().catch(function (e) { console.warn('Qishui login auto refresh failed:', e); });
   }, 45000);
+  if (startQishuiLoginStatusAutoRefresh._boundFocusRefresh) return;
+  startQishuiLoginStatusAutoRefresh._boundFocusRefresh = true;
+  function refreshQishuiOnVisible() {
+    if (document.hidden) return;
+    if (!qishuiLoginStatus.loggedIn && !qishuiLoginWasLoggedIn) return;
+    refreshQishuiLoginStatus().catch(function (e) { console.warn('Qishui login foreground refresh failed:', e); });
+  }
+  window.addEventListener('focus', function () { refreshQishuiOnVisible(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshQishuiOnVisible(); });
 }
 
 function normalizeSpotifyLoginStatus(info) {
@@ -506,8 +524,18 @@ async function refreshSpotifyLoginStatus() {
 function startSpotifyLoginStatusAutoRefresh() {
   if (spotifyLoginAutoRefreshTimer) clearInterval(spotifyLoginAutoRefreshTimer);
   spotifyLoginAutoRefreshTimer = setInterval(function () {
+    if (document.hidden) return; // 后台不轮询，可见时 focus/visibility 补刷
     refreshSpotifyLoginStatus().catch(function (e) { console.warn('Spotify login auto refresh failed:', e); });
   }, 45000);
+  if (startSpotifyLoginStatusAutoRefresh._boundFocusRefresh) return;
+  startSpotifyLoginStatusAutoRefresh._boundFocusRefresh = true;
+  function refreshSpotifyOnVisible() {
+    if (document.hidden) return;
+    if (!spotifyLoginStatus.loggedIn && !spotifyLoginWasLoggedIn) return;
+    refreshSpotifyLoginStatus().catch(function (e) { console.warn('Spotify login foreground refresh failed:', e); });
+  }
+  window.addEventListener('focus', function () { refreshSpotifyOnVisible(); });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshSpotifyOnVisible(); });
 }
 
 function renderUserBtn() {

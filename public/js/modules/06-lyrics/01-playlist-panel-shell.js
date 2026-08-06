@@ -115,19 +115,31 @@ function queueHydrationFooterHtml(compact) {
   if (!queueHydrationState || queueHydrationState.queueRef !== playQueue) return '';
   var loaded = playQueue.length;
   var total = queueHydrationExpectedTotal();
-  if (!queueHydrationState.active && !queueHydrationState.error && (!total || loaded >= total)) return '';
+  var isMergedQueue = queueHydrationState.provider === MERGED_PLAYLIST_PROVIDER;
+  var done = !queueHydrationState.active && !queueHydrationState.error && (!total || loaded >= total);
+  if (done) {
+    // 合并歌单加载完成：保留"已加载完成"提示；其余平台原有逻辑（无状态则隐藏 footer）
+    if (!isMergedQueue) return '';
+    return '<div class="queue-hydration-status' + (compact ? ' compact' : '') + '">' +
+      '<span class="queue-hydration-spinner"></span>' +
+      '<span>已加载完成 · 共 ' + loaded + ' 首</span></div>';
+  }
+  // 合并歌单为自动流式加载：active 期间持续显示"正在加载歌曲"；其余平台保持原有提示
+  var loadingNow = queueHydrationState.loading || (isMergedQueue && queueHydrationState.active);
   var label = queueHydrationState.error
     ? ('后续歌曲载入中断 · 已准备 ' + loaded + (total ? '/' + total : ''))
-    : (queueHydrationState.loading
-      ? ('正在载入下一批 · ' + loaded + (total ? '/' + total : ''))
+    : (loadingNow
+      ? ((isMergedQueue ? '正在加载歌曲 ' : '正在载入下一批 · ') + loaded + (total ? '/' + total : ''))
       : ('已准备 ' + loaded + (total ? '/' + total : '') + ' · 播放或滚动到末尾时继续'));
   var retry = queueHydrationState.error
     ? '<button type="button" class="queue-hydration-retry" onclick="event.stopPropagation();retryPlaylistQueueHydration()">重试</button>'
     : (queueHydrationState.active && !queueHydrationState.loading
-      ? '<button type="button" class="queue-hydration-retry" onclick="event.stopPropagation();requestPlaylistQueueHydrationForBrowse()">再载一批</button>'
+      ? (isMergedQueue
+        ? ''
+        : '<button type="button" class="queue-hydration-retry" onclick="event.stopPropagation();requestPlaylistQueueHydrationForBrowse()">再载一批</button>')
       : '');
   return '<div class="queue-hydration-status' + (compact ? ' compact' : '') + '">' +
-    '<span class="queue-hydration-spinner' + (queueHydrationState.loading ? ' spinning' : '') + '"></span>' +
+    '<span class="queue-hydration-spinner' + (loadingNow ? ' spinning' : '') + '"></span>' +
     '<span>' + label + '</span>' + retry + '</div>';
 }
 function togglePlaylistPanel(force) {

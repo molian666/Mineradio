@@ -167,6 +167,39 @@ async function prepareMergedPlaylistCache(record, options) {
       }
       return { snapshot: previous, changed: false, partial: !!previous.partial, errors: previous.errors || [], cached: true, stale: true };
     }
+    // stream 模式（首次打开流式加载）：缓存 miss 时不阻塞等全量同步，
+    // 立即返回 streaming 标记，让调用方先用网络分页器逐页拉取、边加载边
+    // 展示；全量同步转入后台执行并写缓存，保证下次打开直接命中（秒开）。
+    if (options.stream && !forceSync && !previous) {
+      console.log('[MergedPlaylistCache] cache-miss -> streaming (background sync)', accountKey, 'sources=', (record.sources || []).length);
+      if (!mergedPlaylistCacheRuntime.promise) {
+        mergedPlaylistCacheRuntime.promise = syncMergedPlaylistCache(record.sources || [], accountKey, {
+          adapter: adapter,
+          previousSnapshot: previous,
+          pageSize: options.pageSize || 100,
+          // 后台同步不绑定调用方（详情面板 controller）的 signal：用户关闭/切换
+          // 歌单时 abort 只取消 UI 拉取，不影响缓存写入（否则缓存永远写不进，
+          // 下次打开仍走全量同步）。网络请求走 mergedPlaylistSourcePage 的
+          // timeoutMs 兜底。
+          fetchPage: function (source, offset, limit) {
+            return mergedPlaylistSourcePage(source, offset, limit, null);
+          },
+        }).then(function (result) {
+          if (result && result.snapshot) {
+            mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
+            mergedPlaylistCacheRuntime.snapshot = result.snapshot;
+            updateMergedPlaylistCatalogCount(result.snapshot);
+          }
+          return result;
+        }).catch(function (error) {
+          console.warn('[MergedPlaylistCache] background sync failed:', error && error.message || error);
+          return null;
+        }).finally(function () {
+          mergedPlaylistCacheRuntime.promise = null;
+        });
+      }
+      return { streaming: true, snapshot: null, changed: false, partial: false, errors: [], cached: false };
+    }
     // 后台强制同步（scheduleMergedPlaylistCacheSync）进行中且本地无缓存时，
     // 复用该同步结果，避免再起一次全量拉取。
     if (!previous && !forceSync && mergedPlaylistCacheRuntime.promise) return mergedPlaylistCacheRuntime.promise;
@@ -250,36 +283,9 @@ function fetchMergedPlaylistPage(pager, limit) {
   if (!pager || typeof pager.next !== 'function') return Promise.resolve({ tracks: [], total: 0, nextOffset: 0, hasMore: false, partial: true, errors: [{ error: 'MERGED_PLAYLIST_PAGER_MISSING' }] });
   return pager.next(limit);
 }
-// 一次加载合并歌单的全部歌曲：循环调用分页器直到取完，不再依赖
-// 滚动/后台 hydration 逐页补充。缓存分页器直接吐全量（快），网络分页器
-// 会连续拉取所有源的所有分页直到完成。
-async function loadAllMergedPlaylistTracks(pager, batchSize) {
-  var all = [];
-  var errors = [];
-  var partial = false;
-  var total = 0;
-  var batch = Math.max(1, Number(batchSize) || 200);
-  var guard = 0;
-  while (pager && typeof pager.next === 'function') {
-    guard += 1;
-    if (guard > 500) break; // 安全兜底，避免异常分页器死循环
-    var page = await fetchMergedPlaylistPage(pager, batch);
-    if (!page || typeof page !== 'object') break;
-    all.push.apply(all, Array.isArray(page.tracks) ? page.tracks : []);
-    errors = errors.concat(Array.isArray(page.errors) ? page.errors : []);
-    total = Math.max(total, Number(page.total) || 0, all.length);
-    if (page.partial) partial = true;
-    if (!page.hasMore) break;
-  }
-  return {
-    tracks: all,
-    total: Math.max(total, all.length),
-    nextOffset: all.length,
-    hasMore: false,
-    partial: partial || errors.length > 0,
-    errors: errors,
-  };
-}
+// 合并歌单流式自动拉取的页数上限：防止异常分页器（持续 hasMore 且 nextOffset
+// 递增）导致 120ms/页无限拉取。200 页 × 每页 48~160 首，远大于正常歌单规模。
+var MERGED_PLAYLIST_AUTO_PAGE_LIMIT = 200;
 function cancelPlaylistQueueHydration(reason) {
   var previous = queueHydrationState;
   if (previous && previous.timer) clearTimeout(previous.timer);
@@ -328,7 +334,10 @@ async function hydratePlaylistQueueNextPage(reason) {
     if (playMode === 'shuffle' && pageTracks.length > 1) shuffleArrayInPlace(pageTracks);
     if (pageTracks.length) Array.prototype.push.apply(playQueue, pageTracks);
     state.loaded = playQueue.length;
-    state.total = Math.max(state.total || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0, state.loaded);
+    // 合并歌单：总数以去重后的实际加载数为准，忽略未去重预估 total。
+    state.total = state.provider === MERGED_PLAYLIST_PROVIDER
+      ? Math.max(state.total || 0, state.loaded)
+      : Math.max(state.total || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0, state.loaded);
     state.nextOffset = state.provider === MERGED_PLAYLIST_PROVIDER
       ? Math.max(Number(r && r.nextOffset) || 0, offset + rawTracks.length)
       : Math.max(Number(r && r.nextOffset) || 0, offset + rawTracks.length);
@@ -345,6 +354,14 @@ async function hydratePlaylistQueueNextPage(reason) {
       state.promise = null;
       state.pausedForBuffer = false;
       safeRenderQueuePanel('playlist-queue-hydrate-complete', { animate: false, scrollCurrent: false });
+    } else if (state.provider === MERGED_PLAYLIST_PROVIDER && !state.error && state.token === token) {
+      // 合并歌单流式加载：自动继续拉取直到全部（不依赖播放/滚动触发）。
+      // 页数上限兜底，防止异常分页器（持续 hasMore 且 nextOffset 递增）死循环。
+      if (state.mergedAutoPages >= MERGED_PLAYLIST_AUTO_PAGE_LIMIT) state.active = false;
+      else {
+        state.mergedAutoPages += 1;
+        schedulePlaylistQueueHydration(120, 'merged-auto-hydrate');
+      }
     }
     return pageTracks.length > 0;
   }).catch(function (e) {
@@ -409,13 +426,14 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
     if (!seedTracks.length) {
       if (source.provider === MERGED_PLAYLIST_PROVIDER && !mergedPager) {
         var cacheRecord = mergedPlaylistRecordForId(source.id);
-        var cacheResult = await prepareMergedPlaylistCache(cacheRecord);
+        var cacheResult = await prepareMergedPlaylistCache(cacheRecord, { stream: true });
         mergedPager = cacheResult && cacheResult.snapshot
           ? createMergedPlaylistCachedPager(cacheResult.snapshot)
           : createMergedPlaylistPagerForRecord(cacheRecord);
       }
+      // 合并歌单流式加载：首次只拉一页立即播放，其余由 hydration 自动连续拉取。
       r = source.provider === MERGED_PLAYLIST_PROVIDER
-        ? await loadAllMergedPlaylistTracks(mergedPager, playlistQueuePageSize(source.provider, true))
+        ? await fetchMergedPlaylistPage(mergedPager, playlistQueuePageSize(source.provider, true))
         : await apiJson(playlistQueuePageUrl(source, 0, playlistQueuePageSize(source.provider, true)), { timeoutMs: 16000 });
       seedTracks = (r && r.tracks || []).map(cloneSong);
     } else {
@@ -442,7 +460,11 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
     var catalogPlaylist = userPlaylists.find(function (pl) {
       return normalizePlaylistProvider(pl && pl.provider) === source.provider && String(pl && pl.id || '') === String(source.id || '');
     });
-    var total = Math.max(playQueue.length, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || Number(opts.total) || Number(catalogPlaylist && catalogPlaylist.trackCount) || 0);
+    // 合并歌单：总数以去重后的实际队列长度为准。各平台 trackCount 之和（未去重
+    // 预估，如 273）与网络回退分页器的 total 都不能作为总数残留。
+    var total = source.provider === MERGED_PLAYLIST_PROVIDER
+      ? playQueue.length
+      : Math.max(playQueue.length, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || Number(opts.total) || Number(catalogPlaylist && catalogPlaylist.trackCount) || 0);
     var nextOffset = Math.max(Number(r && r.nextOffset) || Number(opts.nextOffset) || playQueue.length, playQueue.length);
     var hasMore = opts.hasMore != null ? !!opts.hasMore : !!(r && r.hasMore);
     if (source.provider !== MERGED_PLAYLIST_PROVIDER && total > nextOffset) hasMore = true;
@@ -469,6 +491,7 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
       warmPagesRemaining: hasMore ? 1 : 0,
       pausedForBuffer: false,
       mergedPager: mergedPager,
+      mergedAutoPages: 0,
       partial: !!(r && r.partial) || !!opts.partial
     };
     currentIdx = Math.max(0, Math.min(playQueue.length - 1, Number(opts.startIndex) || 0));
@@ -488,7 +511,10 @@ async function loadPlaylistIntoQueueById(id, autoplay, title, opts) {
     forcePlaybackControlsInteractive();
     if (queueHydrationState.active) {
       showToast('已开始播放，后续歌曲会按需流式加入队列');
-      if (queueHydrationState.warmPagesRemaining > 0) {
+      if (source.provider === MERGED_PLAYLIST_PROVIDER) {
+        // 合并歌单：hydration 每页完成后会自动继续调度，直到全部加载完
+        schedulePlaylistQueueHydration(120, 'initial-merged-page');
+      } else if (queueHydrationState.warmPagesRemaining > 0) {
         queueHydrationState.warmPagesRemaining -= 1;
         schedulePlaylistQueueHydration(180, 'initial-warm-page');
       }

@@ -19,6 +19,10 @@ function makeContentListManager() {
   var contentTotalCount = 0;
   var contentHasMore = false;
   var contentLoadingMore = false;
+  // 合并歌单流式自动拉取的页数上限：防止异常分页器（持续 hasMore 且 nextOffset
+  // 递增）导致 360ms/页无限拉取。200 页 × 每页 48 首，远大于正常歌单规模。
+  var contentMergedAutoPages = 0;
+  var SHELF_CONTENT_MERGED_AUTO_PAGE_LIMIT = 200;
   var sourceCard = null;
   var requestToken = 0;
   var contentWarmPrefetchTimer = 0;
@@ -119,10 +123,21 @@ function makeContentListManager() {
     var playableCount = allTracks.filter(function (song) { return song && song.id && song.type !== 'podcast-radio'; }).length;
     var contentCount = allTracks.filter(function (song) { return song && song.id; }).length;
     var isLoading = allTracks.length === 1 && isLoadingLabel(allTracks[0] && allTracks[0].name);
-    var countLabel = contentKind === 'podcast'
-      ? (contentCount ? (contentCount + ' 项播客内容') : (isLoading ? '正在载入' : '暂无播客内容'))
-      : (playableCount ? (playableCount + ' 首歌曲') : (isLoading ? '正在载入' : '暂无可播放歌曲'));
-    if (contentKind !== 'podcast' && contentTotalCount && contentTotalCount > playableCount) {
+    var isMergedContent = !!(contentSource && contentSource.provider === MERGED_PLAYLIST_PROVIDER);
+    var countLabel;
+    if (contentKind === 'podcast') {
+      countLabel = contentCount ? (contentCount + ' 项播客内容') : (isLoading ? '正在载入' : '暂无播客内容');
+    } else if (isLoading) {
+      countLabel = '正在载入';
+    } else if (isMergedContent) {
+      // 合并歌单流式加载：加载中显示"正在加载歌曲 X/Y"，加载完成显示"已加载完成"
+      countLabel = contentHasMore
+        ? ('正在加载歌曲 ' + playableCount + (contentTotalCount && contentTotalCount > playableCount ? '/' + contentTotalCount : ''))
+        : (playableCount ? ('已加载完成 · 共 ' + playableCount + ' 首') : '暂无可播放歌曲');
+    } else {
+      countLabel = playableCount ? (playableCount + ' 首歌曲') : '暂无可播放歌曲';
+    }
+    if (contentKind !== 'podcast' && !isMergedContent && !isLoading && contentTotalCount && contentTotalCount > playableCount) {
       countLabel = playableCount + '/' + contentTotalCount + (contentLoadingMore ? ' loading' : ' loaded');
     }
     ctx.fillText(countLabel, 74, 128);
@@ -283,7 +298,12 @@ function makeContentListManager() {
       var added = appendContentTracks(tracks);
       contentNextOffset = Math.max(contentNextOffset + tracks.length, Number(r && r.nextOffset) || (contentNextOffset + tracks.length));
       var total = Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0;
-      if (total) contentTotalCount = Math.max(contentTotalCount || 0, total);
+      if (contentSource.provider === MERGED_PLAYLIST_PROVIDER) {
+        // 合并歌单：以已加载的去重后实际数为准，忽略未去重的预估 total。
+        contentTotalCount = Math.max(contentTotalCount || 0, allTracks.length);
+      } else if (total) {
+        contentTotalCount = Math.max(contentTotalCount || 0, total);
+      }
       contentSource.partial = contentSource.partial || !!(r && r.partial);
       contentHasMore = !!(r && r.hasMore);
       if (!added && (!tracks.length || allTracks.length === before)) contentHasMore = false;
@@ -291,6 +311,12 @@ function makeContentListManager() {
       rowsDirty = true;
       prefetchContentCoversAround(centerTarget, 'append');
       syncRenderedRows(true);
+      // 合并歌单流式加载：自动继续拉取直到全部（不依赖滚动到底部）
+      if (contentSource.provider === MERGED_PLAYLIST_PROVIDER && contentHasMore && !contentLoadingMore
+          && contentMergedAutoPages < SHELF_CONTENT_MERGED_AUTO_PAGE_LIMIT && token === requestToken) {
+        contentMergedAutoPages += 1;
+        scheduleContentWarmPrefetch(token);
+      }
       return added > 0;
     } catch (e) {
       console.warn('[ShelfContentLoadMore]', reason || '', e);
@@ -658,6 +684,7 @@ function makeContentListManager() {
       contentTotalCount = Number(fromCard && fromCard.item && fromCard.item.trackCount) || 0;
       contentHasMore = false;
       contentLoadingMore = false;
+      contentMergedAutoPages = 0;
       clearContentWarmPrefetch();
       contentCoverPrefetchKey = '';
       if (!group) {
@@ -712,10 +739,24 @@ function makeContentListManager() {
       var qishuiPlaylistId = String(playlistId || '').indexOf('qishui:') === 0 ? String(playlistId).slice(7) : '';
       var spotifyPlaylistId = String(playlistId || '').indexOf('spotify:') === 0 ? String(playlistId).slice(8) : '';
       contentKind = podcastCollectionKey ? 'podcast' : 'playlist';
+      // 合并歌单优先走本地缓存：缓存命中用内存分页器（秒开，且数量为去重后真实数），
+      // 未命中/失败回退网络分页器（与详情面板一致），避免每次打开都全量网络拉取。
+      var mergedRecord = mergedPlaylistId ? mergedPlaylistRecordForId(mergedPlaylistId) : null;
+      var mergedCacheResult = null;
+      if (mergedRecord) {
+        // stream：缓存 miss 时不阻塞等全量同步，先流式逐页展示，后台同步写缓存
+        try { mergedCacheResult = await prepareMergedPlaylistCache(mergedRecord, { stream: true }); }
+        catch (e) { mergedCacheResult = null; }
+      }
+      var mergedPagerForContent = mergedPlaylistId
+        ? (mergedCacheResult && mergedCacheResult.snapshot
+          ? createMergedPlaylistCachedPager(mergedCacheResult.snapshot)
+          : createMergedPlaylistPagerForRecord(mergedRecord))
+        : null;
       contentSource = podcastCollectionKey ? null : {
         provider: mergedPlaylistId ? MERGED_PLAYLIST_PROVIDER : (qqPlaylistId ? 'qq' : (kugouPlaylistId ? 'kugou' : (qishuiPlaylistId ? 'qishui' : (spotifyPlaylistId ? 'spotify' : 'netease')))),
         id: mergedPlaylistId || qqPlaylistId || kugouPlaylistId || qishuiPlaylistId || spotifyPlaylistId || playlistId,
-        pager: mergedPlaylistId ? createMergedPlaylistPagerForRecord(mergedPlaylistRecordForId(mergedPlaylistId)) : null
+        pager: mergedPlaylistId ? mergedPagerForContent : null
       };
       contentPager = contentSource && contentSource.pager;
       // 拉取歌单/播客集合
@@ -765,7 +806,16 @@ function makeContentListManager() {
         allTracks = tracks;
         if (!podcastCollectionKey) {
           contentNextOffset = Number(r && r.nextOffset) || allTracks.length;
-          contentTotalCount = Math.max(contentTotalCount || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0);
+          if (mergedPlaylistId) {
+            // 合并歌单：显示去重后的真实歌曲数（缓存 total 或已加载实际数），
+            // 不被各平台 trackCount 之和（未去重预估，如 273）覆盖。
+            var mergedTotal = mergedCacheResult && mergedCacheResult.snapshot
+              ? Math.max(0, Number(mergedCacheResult.snapshot.total) || (mergedCacheResult.snapshot.tracks || []).length || 0)
+              : 0;
+            contentTotalCount = Math.max(allTracks.length, mergedTotal, 0);
+          } else {
+            contentTotalCount = Math.max(contentTotalCount || 0, Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0);
+          }
           contentSource.partial = !!(r && r.partial);
           contentHasMore = !!(r && r.hasMore);
         }

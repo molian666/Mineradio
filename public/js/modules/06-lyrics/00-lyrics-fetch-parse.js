@@ -5,6 +5,14 @@ function hasUsableLyricLines(lines) {
 }
 var lyricTranslationFallbackCache = {};
 var lyricTranslationFallbackMissCache = {};
+// 翻译缓存条数上限：防止缓存无限增长占用内存，超限时按插入序淘汰最旧条目
+var LYRICS_TRANSLATION_CACHE_LIMIT = 200;
+function trimLyricTranslationCache(cache) {
+  if (!cache) return;
+  var keys = Object.keys(cache);
+  if (keys.length <= LYRICS_TRANSLATION_CACHE_LIMIT) return;
+  keys.slice(0, keys.length - LYRICS_TRANSLATION_CACHE_LIMIT).forEach(function (key) { delete cache[key]; });
+}
 var lyricQueuePrefetchTimer = 0;
 var lyricQueuePrefetchToken = 0;
 var lyricQueuePrefetchBusy = false;
@@ -223,6 +231,7 @@ async function fetchNeteaseLyricTranslationFallback(song, token, cacheKey) {
     var translationPayload = buildLyricTranslationPayload(response || {});
     if (!translationPayload.lines.length) {
       lyricTranslationFallbackMissCache[cacheKey] = Date.now();
+      trimLyricTranslationCache(lyricTranslationFallbackMissCache);
       return false;
     }
     cached = {
@@ -232,9 +241,11 @@ async function fetchNeteaseLyricTranslationFallback(song, token, cacheKey) {
       cachedAt: Date.now()
     };
     lyricTranslationFallbackCache[cacheKey] = cached;
+    trimLyricTranslationCache(lyricTranslationFallbackCache);
     return mergeNeteaseFallbackTranslationsIntoCurrent(song, token, cached, cacheKey);
   } catch (err) {
     lyricTranslationFallbackMissCache[cacheKey] = Date.now();
+    trimLyricTranslationCache(lyricTranslationFallbackMissCache);
     console.warn('[LyricTranslationFallback]', err);
     return false;
   }
@@ -675,7 +686,6 @@ function toggleLyricsPanel(force) {
   }
   lyricsVisible = fx.particleLyrics;
 }
-function updateLyricsHighlight() { /* v8: 由 tickLyricsParticles 接管 */ }
 
 // ============================================================
 //  播放列表面板

@@ -1,4 +1,7 @@
-var playlistPanelDetailState = { key: '', loading: false, loadingMore: false, playlist: null, tracks: [], token: 0, total: 0, nextOffset: 0, hasMore: false, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
+var playlistPanelDetailState = { key: '', loading: false, loadingMore: false, playlist: null, tracks: [], token: 0, total: 0, nextOffset: 0, hasMore: false, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, mergedAutoPages: 0, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
+// 合并歌单流式自动拉取的页数上限：防止异常分页器（持续 hasMore 且 nextOffset
+// 递增）导致 120ms/页无限拉取。200 页 × 每页 48 首，远大于正常歌单规模。
+var PLAYLIST_DETAIL_MERGED_AUTO_PAGE_LIMIT = 200;
 function queueVirtualSpacerHtml(height) {
   height = Math.max(0, Math.round(Number(height) || 0));
   return height ? '<div class="queue-virtual-spacer" aria-hidden="true" style="height:' + height + 'px"></div>' : '';
@@ -209,10 +212,16 @@ function playlistPanelDetailRowsHtml(options) {
   } else if (st.partial) {
     rows += '<div class="pl-detail-progress">部分平台歌单载入失败 · 已显示可用歌曲</div>';
   } else if (st.hasMore || st.loadingMore) {
-    rows += '<div class="pl-detail-progress"><span class="queue-hydration-spinner' + (st.loadingMore ? ' spinning' : '') + '"></span><span>' +
-      (st.loadingMore ? '正在预载后续歌曲 ' : '继续滚动加载 ') + tracks.length + (st.total ? '/' + st.total : '') + '</span></div>';
-  } else if (tracks.length > PLAYLIST_DETAIL_INITIAL_RENDER) {
-    rows += '<div class="pl-detail-progress">已加载全部 ' + tracks.length + ' 首</div>';
+    // 合并歌单为自动流式加载：持续显示"正在加载歌曲"；其余平台保持原有滚动加载提示。
+    var isMergedDetail = String(st.key || '').indexOf('merged:') === 0;
+    var loadingLabel = isMergedDetail
+      ? '正在加载歌曲 '
+      : (st.loadingMore ? '正在预载后续歌曲 ' : '继续滚动加载 ');
+    rows += '<div class="pl-detail-progress"><span class="queue-hydration-spinner' + (isMergedDetail || st.loadingMore ? ' spinning' : '') + '"></span><span>' +
+      loadingLabel + tracks.length + (st.total ? '/' + st.total : '') + '</span></div>';
+  } else if (tracks.length > PLAYLIST_DETAIL_INITIAL_RENDER || (String(st.key || '').indexOf('merged:') === 0 && tracks.length)) {
+    // 合并歌单小歌单（不足一屏）也显示加载完成信息
+    rows += '<div class="pl-detail-progress">' + (String(st.key || '').indexOf('merged:') === 0 ? '已加载完成 · 共 ' : '已加载全部 ') + tracks.length + ' 首</div>';
   }
   return rows;
 }
@@ -297,7 +306,11 @@ function playlistPanelDetailHtml(pl, provider, detailWindow) {
   var loading = playlistPanelDetailState.loading;
   var cover = pl && pl.cover ? (provider === 'netease' ? (pl.cover + '?param=96y96') : pl.cover) : '';
   var img = cover ? '<img class="pl-detail-cover" src="' + escHtml(cover) + '" alt="" decoding="async" onerror="this.style.opacity=0.2">' : '<div class="pl-detail-cover"></div>';
-  var expectedTotal = Math.max(tracks.length, Number(playlistPanelDetailState.total) || Number(pl.trackCount) || 0);
+  // 合并歌单：目录 trackCount 是各平台未去重之和（如 273），不能作为总数兜底；
+  // 以打开后去重过的真实歌曲数为准，避免详情面板显示 273 而实际只有 250 首。
+  var expectedTotal = provider === MERGED_PLAYLIST_PROVIDER
+    ? Math.max(tracks.length, Number(playlistPanelDetailState.total) || 0)
+    : Math.max(tracks.length, Number(playlistPanelDetailState.total) || Number(pl.trackCount) || 0);
   var rows = playlistPanelDetailRowsHtml(detailWindow);
   var canUncollect = !!(pl && pl.subscribed && !pl.virtual && (provider === 'netease' || provider === 'qishui' || provider === 'spotify'));
   var collectionButton = canUncollect
@@ -392,14 +405,16 @@ async function loadMorePlaylistPanelDetailTracks(reason) {
   try {
     if (provider === MERGED_PLAYLIST_PROVIDER) {
       if (!st.mergedPager) {
-        var cacheResult = await prepareMergedPlaylistCache(st.playlist, { signal: controller ? controller.signal : null });
+        var cacheResult = await prepareMergedPlaylistCache(st.playlist, { signal: controller ? controller.signal : null, stream: true });
         st.mergedPager = cacheResult && cacheResult.snapshot
           ? createMergedPlaylistCachedPager(cacheResult.snapshot)
           : createMergedPlaylistPagerForRecord(st.playlist, controller ? controller.signal : null);
       }
     }
+    // 合并歌单流式加载：每次只拉一页（首屏立即展示），由 warm 调度自动
+    // 连续拉取直到全部，不再一次性 loadAll 等全量同步完成。
     var r = provider === MERGED_PLAYLIST_PROVIDER
-      ? await loadAllMergedPlaylistTracks(st.mergedPager, PLAYLIST_DETAIL_BATCH_SIZE)
+      ? await fetchMergedPlaylistPage(st.mergedPager, PLAYLIST_DETAIL_BATCH_SIZE)
       : await apiJson(playlistTracksEndpoint(provider, pid, { limit: PLAYLIST_DETAIL_BATCH_SIZE, offset: offset }), controller ? { signal: controller.signal } : { timeoutMs: 12000 });
     if (playlistPanelDetailState.token !== token || playlistPanelDetailState.key !== st.key) return false;
     var rawTracks = r && r.tracks || [];
@@ -407,7 +422,14 @@ async function loadMorePlaylistPanelDetailTracks(reason) {
     var mapped = rawTracks.map(cloneSong);
     var added = appendPlaylistPanelDetailTracks(st.tracks, mapped);
     var responseTotal = Number(r && (r.total || (r.playlist && r.playlist.trackCount))) || 0;
-    st.total = Math.max(st.total || 0, responseTotal, st.tracks.length);
+    // 合并歌单：缓存分页器（r.cached）返回的 total 是去重后真实数，直接沿用
+    // （避免打开瞬间的 250 被首屏 48 回退）；网络分页器流式加载时以已加载的
+    // 实际数为准，不残留未去重预估。
+    st.total = provider === MERGED_PLAYLIST_PROVIDER
+      ? (r && r.cached
+        ? Math.max(st.total || 0, Number(r.total) || 0)
+        : st.tracks.length)
+      : Math.max(st.total || 0, responseTotal, st.tracks.length);
     st.nextOffset = provider === MERGED_PLAYLIST_PROVIDER
       ? Math.max(st.tracks.length, Number(r && r.nextOffset) || 0)
       : Math.max(offset + rawTracks.length, Number(r && r.nextOffset) || 0);
@@ -430,6 +452,17 @@ async function loadMorePlaylistPanelDetailTracks(reason) {
       }
     } else {
       renderPlaylistPanelDetailRows();
+      // 合并歌单流式加载：自动继续拉取直到全部（不依赖滚动到底部）。
+      // 缓存分页器为内存切片（快），网络分页器逐页拉取（边加载边展示）。
+      if (provider === MERGED_PLAYLIST_PROVIDER && st.hasMore && !st.loadingMore && st.mergedAutoPages < PLAYLIST_DETAIL_MERGED_AUTO_PAGE_LIMIT
+          && playlistPanelDetailState.token === token && playlistPanelDetailState.key === st.key) {
+        st.mergedAutoPages += 1;
+        if (st.warmTimer) clearTimeout(st.warmTimer);
+        st.warmTimer = setTimeout(function () {
+          st.warmTimer = 0;
+          if (playlistPanelDetailState.token === token && playlistPanelDetailState.key === st.key) loadMorePlaylistPanelDetailTracks('warm');
+        }, 120);
+      }
     }
     return added > 0;
   } catch (e) {
@@ -466,7 +499,12 @@ async function openPlaylistPanelDetail(provider, pid, title) {
   }
   cancelPlaylistPanelDetailRequest();
   var token = ++playlistPanelDetailState.token;
-  playlistPanelDetailState = { key: key, loading: true, loadingMore: false, playlist: pl, tracks: [], token: token, total: Number(pl.trackCount) || 0, nextOffset: 0, hasMore: true, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
+  // 合并歌单：初始 total 不用目录 trackCount（无缓存时是各平台未去重之和，如 273）；
+  // 有缓存匹配时用去重后真实数，否则置 0（加载中显示"载入中"，加载完成后以实际数为准）。
+  var initialTotal = provider === MERGED_PLAYLIST_PROVIDER
+    ? (mergedPlaylistCachedTrackCountFor(pl.sources || []) || 0)
+    : (Number(pl.trackCount) || 0);
+  playlistPanelDetailState = { key: key, loading: true, loadingMore: false, playlist: pl, tracks: [], token: token, total: initialTotal, nextOffset: 0, hasMore: true, scrollTop: 0, controller: null, warmTimer: 0, mergedPager: null, mergedAutoPages: 0, partial: false, renderLimit: PLAYLIST_DETAIL_INITIAL_RENDER, error: '', message: '' };
   renderPlaylistPanelDetailState();
   scrollPlaylistPanelDetailIntoView(key);
   await loadMorePlaylistPanelDetailTracks('initial');

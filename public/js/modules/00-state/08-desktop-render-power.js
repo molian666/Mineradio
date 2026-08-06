@@ -142,12 +142,8 @@ function isBackgroundReleaseMode() {
 function isHiddenForBackgroundOptimization() {
   return !!(document.hidden && !isLiveBackgroundKeepMode());
 }
-function isVisibleBackgroundMode() {
-  return false;
-}
 function updateRenderPowerClasses() {
   document.body.classList.toggle('render-deep-sleep', isDeepBackgroundMode());
-  document.body.classList.toggle('render-background-eco', isVisibleBackgroundMode());
 }
 function safeObjectKeys(obj) {
   try { return obj ? Object.keys(obj) : []; } catch (e) { return []; }

@@ -1268,7 +1268,6 @@ async function playQueueAt(idx, opts) {
         );
         if (typeof updateControlTrackInfo === 'function') updateControlTrackInfo(song);
         if (isKugouPlayback && typeof applyKugouPlaybackStatusEvidence === 'function') applyKugouPlaybackStatusEvidence(data);
-        if (isQQPlayback && typeof applyQQPlaybackStatusEvidence === 'function') applyQQPlaybackStatusEvidence(data, song);
       }
       var retryPlaybackOpts = Object.assign({}, opts, { resumeAt: opts.resumeAt != null ? opts.resumeAt : restoreResumeAt });
       if (!data || !data.url) {

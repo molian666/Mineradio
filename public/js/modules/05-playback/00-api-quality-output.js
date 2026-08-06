@@ -865,7 +865,10 @@ function syncAudioOutputMirrors(reason) {
     }
   });
   if (!audioOutputMirrorSyncTimer) {
-    audioOutputMirrorSyncTimer = setInterval(function () { syncAudioOutputMirrors('clock'); }, 2200);
+    audioOutputMirrorSyncTimer = setInterval(function () {
+      if (document.hidden) return; // 后台不镜像同步
+      syncAudioOutputMirrors('clock');
+    }, 2200);
   }
 }
 async function applyAudioOutputDevice(media) {

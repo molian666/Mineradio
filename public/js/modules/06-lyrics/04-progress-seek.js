@@ -488,7 +488,22 @@ function endProgressDrag(e, commit) {
 progressBar.addEventListener('pointerup', function (e) { endProgressDrag(e, true); });
 progressBar.addEventListener('pointercancel', function (e) { endProgressDrag(e, false); });
 progressBar.addEventListener('lostpointercapture', function (e) { endProgressDrag(e, true); });
+var hiddenBackgroundTickAt = 0;
 setInterval(function () {
+  var hidden = document.hidden || (typeof isDeepBackgroundMode === 'function' && isDeepBackgroundMode());
+  if (hidden) {
+    // 后台：跳过 UI DOM 更新；仍低频累计听歌统计与播放进度快照（防止
+    // 后台播放的时长/进度丢失，快照保存内部还有 2.5s 节流）。
+    if (audio && !audio.paused) {
+      var nowTick = Date.now();
+      if (nowTick - hiddenBackgroundTickAt >= 1000) {
+        hiddenBackgroundTickAt = nowTick;
+        updateListenStatsTick(false);
+        saveLastPlaybackSnapshot(false, 'tick');
+      }
+    }
+    return;
+  }
   if (!audio) {
     if (restoredLastPlaybackSnapshot && pendingPlaybackResumeAt > 0) applyRestoredPlaybackProgressUi(restoredLastPlaybackSnapshot);
     else updatePlaybackProgressUi();
@@ -501,7 +516,6 @@ setInterval(function () {
   updateListenStatsTick(false);
   updatePlaybackProgressUi();
   saveLastPlaybackSnapshot(false, 'tick');
-  if (audio.currentTime) updateLyricsHighlight();
 }, 200);
 
 // ============================================================

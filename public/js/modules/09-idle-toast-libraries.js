@@ -220,21 +220,33 @@ function drawIdleGuideTrail(ctx, trail, now, alpha, energy) {
   }
   ctx.restore();
 }
+var idleGuideRafPending = false;
 function scheduleIdleGuideFrame(delay) {
   if (idleGuideDelayTimer) {
     clearTimeout(idleGuideDelayTimer);
     idleGuideDelayTimer = null;
   }
+  function scheduleRaf() {
+    // 合并调度：已有 rAF 排队时不再追加，避免 focus/visibilitychange 双事件
+    // 或帧尾调度叠加出多条 rAF 链（每帧翻倍、指数增长）
+    if (idleGuideRafPending) return;
+    idleGuideRafPending = true;
+    requestAnimationFrame(drawIdleGuideFrame);
+  }
   if (delay && delay > 0) {
     idleGuideDelayTimer = setTimeout(function () {
       idleGuideDelayTimer = null;
-      requestAnimationFrame(drawIdleGuideFrame);
+      scheduleRaf();
     }, delay);
   } else {
-    requestAnimationFrame(drawIdleGuideFrame);
+    scheduleRaf();
   }
 }
 function drawIdleGuideFrame() {
+  idleGuideRafPending = false; // rAF 已执行，允许下一次调度
+  // 后台（窗口隐藏 / 最小化到托盘）时停止 idle-guide 绘制循环，
+  // 可见时由 resumeIdleGuideIfVisible 恢复。
+  if (document.hidden) return;
   if (!idleGuideCanvas || !idleGuideCtx) return;
   var ctx = idleGuideCtx;
   var nowFrame = performance.now();
@@ -474,7 +486,13 @@ function initIdleGuideCanvas() {
   idleGuideStartedAt = performance.now();
   resizeIdleGuideCanvas();
   window.addEventListener('resize', resizeIdleGuideCanvas);
+  document.addEventListener('visibilitychange', resumeIdleGuideIfVisible);
+  window.addEventListener('focus', resumeIdleGuideIfVisible);
   drawIdleGuideFrame();
+}
+function resumeIdleGuideIfVisible() {
+  // 从托盘/后台恢复可见时重启绘制循环（rAF 链在 hidden 期间已停止）
+  if (!document.hidden && idleGuideCanvas && idleGuideCtx) scheduleIdleGuideFrame(0);
 }
 
 // ============================================================
