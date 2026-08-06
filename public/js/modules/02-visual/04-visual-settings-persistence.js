@@ -400,7 +400,7 @@ function readSavedLyricLayout() {
       shelfCameraMode: savedShelfCameraMode,
       shelfPresence: savedShelfPresence,
       shelfShowPodcasts: raw.shelfShowPodcasts !== false,
-      shelfMergeCollections: raw.shelfMergeCollections === true,
+      shelfMergeCollections: raw.shelfMergeCollections !== false,
       shelfSize: clampRange(raw.shelfSize == null ? fxDefaults.shelfSize : Number(raw.shelfSize), 0.65, 1.45),
       shelfOffsetX: clampRange(raw.shelfOffsetX == null ? fxDefaults.shelfOffsetX : Number(raw.shelfOffsetX), -1.2, 1.2),
       shelfOffsetY: clampRange(raw.shelfOffsetY == null ? fxDefaults.shelfOffsetY : Number(raw.shelfOffsetY), -0.9, 0.9),

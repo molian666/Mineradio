@@ -595,6 +595,25 @@ function playlistCatalogHasPendingPages() {
   var providers = playlistCatalogSyncState.providers || {};
   return Object.keys(providers).some(function (key) { return providers[key] && (providers[key].loading || providers[key].hasMore); });
 }
+// 目录加载完成（无 pending）时收尾：清除 root.error 并一次性 toast 提示失败，
+// 避免 footer 常驻"部分歌单载入失败"与加载动画。返回 true 表示已收尾。
+function finishPlaylistCatalogLoadingIfDone() {
+  var root = playlistCatalogSyncState;
+  if (!root || playlistCatalogHasPendingPages()) return false;
+  root.loading = false;
+  if (root.error) {
+    var failed = Object.keys(root.providers || {}).filter(function (key) { return root.providers[key] && root.providers[key].error; });
+    var loggedInProviders = Object.keys(root.providers || {}).filter(function (key) { return typeof playlistCatalogProviderLoggedIn === 'function' && playlistCatalogProviderLoggedIn(key); });
+    // 合并歌单开启且部分平台失败时不弹 toast（平台歌单不显示是设计行为、合并歌单
+    // 已可用）；全部已登录平台都失败时仍提示（合并歌单无数据源，属于真实失败）。
+    var allLoggedInFailed = loggedInProviders.length > 0 && loggedInProviders.length === failed.length;
+    if ((!(fx && fx.shelfMergeCollections) || allLoggedInFailed) && typeof showToast === 'function') {
+      showToast('部分歌单载入失败 · 已显示可用歌单' + (failed.length ? '（' + failed.length + ' 个平台）' : ''));
+    }
+    root.error = '';
+  }
+  return true;
+}
 function requestNextPlaylistCatalogPage(reason) {
   var root = playlistCatalogSyncState;
   if (!root || !root.providers) return false;
@@ -608,8 +627,7 @@ function requestNextPlaylistCatalogPage(reason) {
     return false;
   }
   loadPlaylistCatalogProviderPage(provider, reason || 'background').finally(function () {
-    if (playlistCatalogSyncState !== root || !playlistCatalogHasPendingPages()) {
-      root.loading = false;
+    if (playlistCatalogSyncState !== root || finishPlaylistCatalogLoadingIfDone()) {
       if (userPlaylists.length) renderUserPlaylistsList({ preserveScroll: true });
       if (typeof scheduleMergedPlaylistCacheSync === 'function') scheduleMergedPlaylistCacheSync('catalog-background-complete');
       return;
@@ -707,7 +725,7 @@ async function refreshUserPlaylists(force) {
     : Promise.resolve();
   await Promise.allSettled(firstPageTasks.concat([podcastTask]));
   if (playlistCatalogSyncState.token !== token) return;
-  playlistCatalogSyncState.loading = playlistCatalogHasPendingPages();
+  finishPlaylistCatalogLoadingIfDone();
   if (userPlaylists.length) renderUserPlaylistsList({ animate: isPlaylistPanelVisibleForRender(), preserveScroll: true });
   if (!playlistCatalogSyncState.loading && typeof scheduleMergedPlaylistCacheSync === 'function') scheduleMergedPlaylistCacheSync('catalog-first-pages');
   if (playlistCatalogSyncState.loading) requestNextPlaylistCatalogPage('after-first-pages');

@@ -330,23 +330,33 @@ function renderPlaylistPanelDetailState() {
 function scrollPlaylistPanelToTop() {
   var panel = document.getElementById('playlist-panel');
   if (!panel) return;
-  try { panel.scrollTo({ top: 0, behavior: 'smooth' }); }
-  catch (e) { panel.scrollTop = 0; }
+  // 详情是 #playlist-panel 内的内联块（pl-detail-list 为 overflow:visible），
+  // 滚动轴在面板上。滚到当前详情顶部而非面板绝对顶部——合并歌单详情可能
+  // 不在面板首项（如"我的歌单"栏目之下），滚到 0 会把详情滚出视野，
+  // 表现为"回到顶部没响应"。详情行虚拟化由 panel.scrollTop 几何驱动，
+  // 滚动后详情列表自动回到首屏。
+  scrollPlaylistPanelDetailIntoView(playlistPanelDetailState && playlistPanelDetailState.key);
 }
 function scrollPlaylistPanelDetailIntoView(key) {
   var panel = document.getElementById('playlist-panel');
   if (!panel || !key) return;
   requestAnimationFrame(function () {
-    var detail = null;
-    Array.prototype.some.call(panel.querySelectorAll('[data-pl-detail]'), function (node) {
-      if (node.getAttribute('data-pl-detail') === key) {
-        detail = node;
-        return true;
-      }
-      return false;
-    });
-    if (!detail) return;
-    var anchor = detail.previousElementSibling || detail;
+    // 用虚拟列表缓存计算详情在列表内容中的绝对偏移。不能用 DOM 的
+    // detail.previousElementSibling.offsetTop：详情滚出视口后，虚拟化渲染
+    // 会把 anchor 换成模拟高度的 .playlist-virtual-spacer，其 offsetTop 随
+    // 视口变化，算出的 top ≈ 当前 scrollTop，导致"回到顶部只移动一点点"。
+    var cache = typeof playlistPanelBuildVirtualEntries === 'function' ? playlistPanelBuildVirtualEntries() : null;
+    var detailIndex = -1;
+    if (cache && Array.isArray(cache.entries)) {
+      cache.entries.some(function (entry, i) {
+        if (entry && entry.type === 'detail' && entry.pl && playlistPanelKey(entry.provider, entry.pl.id) === key) {
+          detailIndex = i;
+          return true;
+        }
+        return false;
+      });
+    }
+    if (detailIndex < 0 || !cache || !Array.isArray(cache.offsets)) return;
     var toolbar = panel.querySelector('.queue-toolbar');
     var safeOffset = 126;
     if (toolbar) {
@@ -354,9 +364,12 @@ function scrollPlaylistPanelDetailIntoView(key) {
       try { toolbarTop = parseFloat(getComputedStyle(toolbar).top) || toolbarTop; } catch (e) { }
       safeOffset = Math.max(safeOffset, toolbarTop + toolbar.offsetHeight + 12);
     }
-    var top = Math.max(0, anchor.offsetTop - safeOffset);
-    try { panel.scrollTo({ top: top, behavior: 'smooth' }); }
-    catch (e) { panel.scrollTop = top; }
+    var top = Math.max(0, (cache.offsets[detailIndex] || 0) - safeOffset);
+    // 瞬时定位而非 behavior:'smooth'：smooth 第一帧触发 panel scroll 事件 →
+    // rAF 虚拟列表重建（preserveScroll 恢复当前 scrollTop）会中断 smooth 动画，
+    // 滚动停在第一帧附近（"回到顶部只移动一点点"）。瞬时赋值一次到位，
+    // 后续渲染的 preserveScroll 恢复的值就是目标值本身，互不干扰。
+    panel.scrollTop = top;
   });
 }
 function cancelPlaylistPanelDetailRequest() {
@@ -618,8 +631,10 @@ function playlistPanelBuildVirtualEntries() {
       playlistPanelVirtualCache.detailKey === playlistPanelDetailState.key &&
       playlistPanelVirtualCache.detailSig === detailSig) return playlistPanelVirtualCache;
   var labels = { netease: '网易云歌单', qq: 'QQ 音乐歌单', kugou: '酷狗音乐歌单', qishui: '汽水音乐歌单', spotify: 'Spotify 歌单', merged: '跨平台合并歌单' };
-  var order = ['netease', 'qq', 'kugou', 'qishui', 'spotify'];
-  var groups = { netease: [], qq: [], kugou: [], qishui: [], spotify: [] };
+  // merged 放在首位：开启合并歌单时 userPlaylists 只含合并歌单记录，
+  // 分组必须遍历 merged，否则合并歌单卡永远不会渲染（列表为空）。
+  var order = ['merged', 'netease', 'qq', 'kugou', 'qishui', 'spotify'];
+  var groups = { merged: [], netease: [], qq: [], kugou: [], qishui: [], spotify: [] };
   userPlaylists.forEach(function (pl, sourceIndex) {
     var key = playlistPanelGroupKey(pl);
     if (!groups[key]) groups[key] = [];
@@ -677,7 +692,8 @@ function playlistCatalogFooterHtml() {
   var label = state.error
     ? ('部分歌单载入失败 · 已显示 ' + userPlaylists.length + ' 个')
     : ('正在后台载入歌单 · ' + totals.loaded + (totals.total ? '/' + totals.total : ''));
-  return '<div class="playlist-catalog-status"><span class="queue-hydration-spinner spinning"></span><span>' + label + '</span></div>';
+  // spinner 只在真正加载中（pending）时转；纯错误提示为静态，避免误导
+  return '<div class="playlist-catalog-status"><span class="queue-hydration-spinner' + (totals.pending ? ' spinning' : '') + '"></span><span>' + label + '</span></div>';
 }
 function schedulePlaylistPanelVirtualRender() {
   if (playlistPanelVirtualCache.raf) return;

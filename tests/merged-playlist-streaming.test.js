@@ -157,3 +157,79 @@ test('流式加载路径：详情面板 / 播放队列 / shelf 均使用单页�
   assert.match(shelf, /prepareMergedPlaylistCache\([^)]*stream:\s*true/);
   assert.match(shelf, /scheduleContentWarmPrefetch\(token\)/);
 });
+
+test('合并歌单源集合匹配判定：相同源匹配、增/减源不匹配', () => {
+  const M = loadEnvironment();
+  const snapshot = {
+    sources: [{ provider: 'netease', id: '111' }, { provider: 'qq', id: '222' }],
+    tracks: [], total: 0, partial: false, errors: [],
+  };
+  assert.equal(M.mergedPlaylistSnapshotSourcesMatch(
+    [{ provider: 'netease', id: '111' }, { provider: 'qq', id: '222' }], snapshot), true, '相同源集合匹配');
+  assert.equal(M.mergedPlaylistSnapshotSourcesMatch(
+    [{ provider: 'netease', id: '111' }], snapshot), false, '少一个源不匹配');
+  assert.equal(M.mergedPlaylistSnapshotSourcesMatch(
+    [{ provider: 'netease', id: '111' }, { provider: 'qq', id: '222' }, { provider: 'spotify', id: '333' }], snapshot), false, '多一个源不匹配');
+  assert.equal(M.mergedPlaylistSnapshotSourcesMatch([], snapshot), false, '空源不匹配');
+});
+
+test('合并歌单：缓存与目录源不匹配时视为 miss 重新拉取（修复目录 190/详情 177 不一致）', async () => {
+  const M = loadEnvironment();
+  const adapter = M.createMergedPlaylistCacheAdapter(memoryAdapter());
+  const fetchPage = async function (source, offset, limit) {
+    const all = TRACKS_BY_KEY[source.provider + ':' + source.id] || [];
+    const page = all.slice(offset, offset + limit);
+    const nextOffset = offset + page.length;
+    return { tracks: page, hasMore: nextOffset < all.length, nextOffset, total: all.length };
+  };
+  // 先建缓存：netease + qq 两个源
+  await M.syncMergedPlaylistCache(SOURCE_ROWS, ACCOUNT_KEY, { adapter, pageSize: 100, fetchPage });
+  // 目录源集合变化：只剩 netease（如用户取消了 QQ 登录/收藏）
+  const changedSources = [SOURCE_ROWS[0]];
+  const result = await M.prepareMergedPlaylistCache(
+    { provider: 'merged', id: 'all', sources: changedSources },
+    { stream: true, adapter }
+  );
+  assert.equal(result.cached, false, '源不匹配时不直接返回旧缓存');
+  assert.equal(result.streaming, true, '走流式重新拉取');
+  await M.mergedPlaylistCacheRuntime.promise;
+  const cached = await adapter.load(M.mergedPlaylistCacheKey(ACCOUNT_KEY));
+  assert.ok(cached, '缓存已重建');
+  assert.equal(cached.sources.length, 1, '缓存按新源集合重建');
+  assert.equal(cached.total, 160, '缓存 total 为新的去重实际数');
+});
+
+test('合并开启时 4 处平台登录刷新判断改用平台歌单数组（修复"正在加载其他歌单"恒显示）', () => {
+  const loginStatus = fs.readFileSync(path.join(root, '08-account', '02-login-status.js'), 'utf8');
+  assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !qqPlaylists\.length/);
+  assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !kugouPlaylists\.length/);
+  assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !qishuiPlaylists\.length/);
+  assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !spotifyPlaylists\.length/);
+});
+
+test('目录加载完成时清除失败状态（footer 不常驻"部分歌单载入失败"且 spinner 仅加载中转）', () => {
+  const shell = fs.readFileSync(path.join(root, '06-lyrics', '01-playlist-panel-shell.js'), 'utf8');
+  const detail = fs.readFileSync(path.join(root, '06-lyrics', '02-playlist-detail.js'), 'utf8');
+  // 加载完成收尾：清除 root.error 并一次性 toast
+  assert.match(shell, /function finishPlaylistCatalogLoadingIfDone/);
+  assert.match(shell, /root\.error = '';/);
+  assert.match(shell, /showToast\('部分歌单载入失败/);
+  assert.ok((shell.match(/finishPlaylistCatalogLoadingIfDone\(\)/g) || []).length >= 2, 'refreshUserPlaylists 与 requestNextPlaylistCatalogPage 两处调用');
+  // footer spinner 仅在 pending 时转
+  assert.match(detail, /queue-hydration-spinner' \+ \(totals\.pending \? ' spinning' : ''\)/);
+});
+
+test('合并歌单开启时目录失败不弹 toast（平台歌单不显示是设计非失败）；回到顶部滚到详情顶部', () => {
+  const shell = fs.readFileSync(path.join(root, '06-lyrics', '01-playlist-panel-shell.js'), 'utf8');
+  const detail = fs.readFileSync(path.join(root, '06-lyrics', '02-playlist-detail.js'), 'utf8');
+  // toast 在未合并或全部已登录平台失败时提示；合并开启且部分失败只清 error
+  assert.match(shell, /!\(fx && fx\.shelfMergeCollections\) \|\| allLoggedInFailed/);
+  assert.match(shell, /root\.error = '';/);
+  // 回到顶部：滚 #playlist-panel 到详情顶部（详情滚动轴在面板上，虚拟化由 panel.scrollTop 几何驱动）
+  assert.match(detail, /scrollPlaylistPanelDetailIntoView\(playlistPanelDetailState && playlistPanelDetailState\.key\);/);
+  // 详情定位用虚拟列表缓存绝对偏移（不用 DOM offsetTop，避免 spacer 导致"只移动一点点"）
+  assert.match(detail, /playlistPanelBuildVirtualEntries\(\)/);
+  assert.match(detail, /cache\.offsets\[detailIndex\]/);
+  // 瞬时定位而非 smooth（smooth 会被虚拟渲染重建的 preserveScroll 打断）
+  assert.match(detail, /panel\.scrollTop = top;/);
+});

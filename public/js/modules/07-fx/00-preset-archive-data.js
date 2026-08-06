@@ -472,7 +472,7 @@ function normalizeFxArchiveSnapshot(raw) {
     shelfCameraMode: archiveMode(raw, 'shelfCameraMode', /^(dynamic|static)$/, fxDefaults.shelfCameraMode),
     shelfPresence: archiveShelfPresence,
     shelfShowPodcasts: raw.shelfShowPodcasts !== false,
-    shelfMergeCollections: raw.shelfMergeCollections === true,
+    shelfMergeCollections: raw.shelfMergeCollections !== false,
     shelfSize: archiveNumber(raw, 'shelfSize', fxDefaults.shelfSize, 0.65, 1.45),
     shelfOffsetX: archiveNumber(raw, 'shelfOffsetX', fxDefaults.shelfOffsetX, -1.2, 1.2),
     shelfOffsetY: archiveNumber(raw, 'shelfOffsetY', fxDefaults.shelfOffsetY, -0.9, 0.9),

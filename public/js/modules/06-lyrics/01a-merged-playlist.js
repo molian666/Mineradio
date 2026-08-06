@@ -545,19 +545,25 @@ function buildMergedPlaylistRecord(sourcePlaylists) {
   };
 }
 
+function mergedPlaylistSnapshotSourcesMatch(recordSources, snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.sources)) return false;
+  var rows = (recordSources || []).filter(function (playlist) {
+    return playlist && playlist.provider && playlist.id != null;
+  });
+  if (!rows.length || rows.length !== snapshot.sources.length) return false;
+  var snapshotKeys = Object.create(null);
+  (snapshot.sources || []).forEach(function (source) { snapshotKeys[mergedSourceKey(source)] = true; });
+  for (var i = 0; i < rows.length; i += 1) {
+    if (!snapshotKeys[mergedSourceKey(rows[i])]) return false;
+  }
+  return true;
+}
+
 function mergedPlaylistCachedTrackCountFor(sourcePlaylists) {
   var snapshot = mergedPlaylistCacheRuntime.snapshot;
   if (!snapshot || !Array.isArray(snapshot.sources)) return 0;
   if (mergedPlaylistCacheRuntime.accountKey !== String(currentMergedPlaylistAccountKey() || '')) return 0;
-  var rows = (sourcePlaylists || []).filter(function (playlist) {
-    return playlist && playlist.provider && playlist.id != null;
-  });
-  if (!rows.length || rows.length !== snapshot.sources.length) return 0;
-  var snapshotKeys = Object.create(null);
-  (snapshot.sources || []).forEach(function (source) { snapshotKeys[mergedSourceKey(source)] = true; });
-  for (var i = 0; i < rows.length; i += 1) {
-    if (!snapshotKeys[mergedSourceKey(rows[i])]) return 0;
-  }
+  if (!mergedPlaylistSnapshotSourcesMatch(sourcePlaylists || [], snapshot)) return 0;
   return Math.max(0, Number(snapshot.total) || (snapshot.tracks || []).length || 0);
 }
 

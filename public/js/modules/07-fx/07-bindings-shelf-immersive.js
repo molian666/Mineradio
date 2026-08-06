@@ -423,6 +423,11 @@ function toggleFx(key) {
     if (key === 'shelfMergeCollections') {
       if (typeof closePlaylistPanelDetail === 'function') closePlaylistPanelDetail('歌单目录已切换');
       if (typeof rebuildUserPlaylistsFromCatalog === 'function') rebuildUserPlaylistsFromCatalog({ animate: false, reset: true, preserveScroll: false, reason: 'playlist-merge-toggle' });
+      // 目录数据未就绪（启动早期 / 目录尚未加载）时强制刷新，确保合并歌单出现
+      if (fx.shelfMergeCollections === true && typeof refreshUserPlaylists === 'function') {
+        var mergedProviderRowsReady = [neteasePlaylists, qqPlaylists, kugouPlaylists, qishuiPlaylists, spotifyPlaylists].some(function (arr) { return Array.isArray(arr) && arr.length > 0; });
+        if (!mergedProviderRowsReady) refreshUserPlaylists(true);
+      }
     }
     if (shelfManager && shelfManager.rebuild) shelfManager.rebuild(true);
     if (shelfManager && shelfManager.refreshTheme) shelfManager.refreshTheme();

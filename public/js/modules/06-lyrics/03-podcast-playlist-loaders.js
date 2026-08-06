@@ -150,6 +150,15 @@ async function prepareMergedPlaylistCache(record, options) {
       ? mergedPlaylistCacheRuntime.snapshot
       : null;
     if (!previous) previous = await loadMergedPlaylistCache(accountKey, adapter);
+    if (previous && !forceSync && (record.sources || []).length) {
+      // 缓存源集合与当前目录源不一致（新增/减少平台或歌单）时缓存已过时：
+      // 直接复用旧快照会让详情显示旧缓存数、目录显示未去重预估（如 177 vs 190）；
+      // 视为 miss 走下方同步/流式分支重新拉取，保证两者收敛到同一实际数。
+      // sources 为空时不检查（避免空源覆盖已有缓存）。
+      if (!mergedPlaylistSnapshotSourcesMatch(record.sources, previous)) {
+        previous = null;
+      }
+    }
     if (previous && !forceSync) {
       mergedPlaylistCacheRuntime.accountKey = String(accountKey || 'anonymous');
       mergedPlaylistCacheRuntime.snapshot = previous;

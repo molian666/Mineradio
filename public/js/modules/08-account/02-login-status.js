@@ -222,7 +222,7 @@ async function refreshQQLoginStatus(options) {
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qq'; });
       playlistCatalogRevision += 1;
       homeDiscoverState.loaded = false;
-    } else if (!userPlaylists.some(function (pl) { return pl && pl.provider === 'qq'; })) {
+    } else if ((fx && fx.shelfMergeCollections) ? !qqPlaylists.length : !userPlaylists.some(function (pl) { return pl && pl.provider === 'qq'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
       loadHomeDiscover(true);
@@ -349,7 +349,7 @@ async function refreshKugouLoginStatus() {
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'kugou'; });
       playlistCatalogRevision += 1;
       homeDiscoverState.loaded = false;
-    } else if (!userPlaylists.some(function (pl) { return pl && pl.provider === 'kugou'; })) {
+    } else if ((fx && fx.shelfMergeCollections) ? !kugouPlaylists.length : !userPlaylists.some(function (pl) { return pl && pl.provider === 'kugou'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
       refreshUserPlaylists(true);
@@ -425,7 +425,7 @@ async function refreshQishuiLoginStatus() {
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qishui'; });
       playlistCatalogRevision += 1;
       homeDiscoverState.loaded = false;
-    } else if (!userPlaylists.some(function (pl) { return pl && pl.provider === 'qishui'; })) {
+    } else if ((fx && fx.shelfMergeCollections) ? !qishuiPlaylists.length : !userPlaylists.some(function (pl) { return pl && pl.provider === 'qishui'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
       refreshUserPlaylists(true);
@@ -504,7 +504,7 @@ async function refreshSpotifyLoginStatus() {
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'spotify'; });
       playlistCatalogRevision += 1;
       homeDiscoverState.loaded = false;
-    } else if (!userPlaylists.some(function (pl) { return pl && pl.provider === 'spotify'; })) {
+    } else if ((fx && fx.shelfMergeCollections) ? !spotifyPlaylists.length : !userPlaylists.some(function (pl) { return pl && pl.provider === 'spotify'; })) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
       refreshUserPlaylists(true);
