@@ -741,6 +741,7 @@ function cyclePlayMode() {
   if (playMode === 'shuffle' && prevMode !== 'shuffle') {
     reorderQueueForShufflePlaybackOrder(currentIdx, { reason: 'play-mode-shuffle' });
   }
+  savePlayModePreference(playMode);
   updatePlayModeButton(true);
   showToast('播放模式: ' + playModeLabel(playMode));
 }

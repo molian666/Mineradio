@@ -152,6 +152,7 @@ var LAST_PLAYBACK_STORE_KEY = 'mineradio-last-playback-v1';
 var STARTUP_AUTOPLAY_STORE_KEY = 'mineradio-startup-autoplay-v1';
 var STARTUP_FAST_SKIP_STORE_KEY = 'mineradio-startup-fast-skip-v1';
 var STARTUP_RESUME_MODE_STORE_KEY = 'mineradio-startup-resume-mode-v1';
+var PLAY_MODE_STORE_KEY = 'mineradio-play-mode-v1';
 var LOCAL_BEATMAP_STORE_KEY = 'mineradio-local-beatmaps-v1';
 var LOCAL_BEAT_PREF_STORE_KEY = 'mineradio-local-beatmap-prefs-v1';
 var LOCAL_BEAT_COMBOS = ['', 'downbeat', 'push', 'drop', 'rebound', 'accent'];

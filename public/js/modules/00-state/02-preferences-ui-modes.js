@@ -6,6 +6,18 @@ function readSavedVolume() {
     return 1.0;
   }
 }
+function normalizePlayMode(mode) {
+  mode = String(mode || '').trim();
+  return /^(loop|shuffle|single)$/.test(mode) ? mode : 'loop';
+}
+function readPlayModePreference() {
+  try { return normalizePlayMode(localStorage.getItem(PLAY_MODE_STORE_KEY) || 'loop'); }
+  catch (e) { return 'loop'; }
+}
+function savePlayModePreference(mode) {
+  try { localStorage.setItem(PLAY_MODE_STORE_KEY, normalizePlayMode(mode)); }
+  catch (e) { }
+}
 function normalizeAudioFadeMs(value, fallback) {
   var ms = Math.round(Number(value));
   if (!isFinite(ms)) ms = fallback;
