@@ -75,6 +75,7 @@ function onUserBtnClick() {
     topAccountPillClickSuppressed = false;
     return;
   }
+  // 点击账号胶囊统一打开「登录接入」面板；已登录时默认选中第一个已登录平台
   showLoginModal({ provider: hasAnyPlatformLogin() ? firstLoggedProvider() : loginProvider, source: 'top-account' });
 }
 var ACCOUNT_PROVIDER_KEYS = ['netease', 'qq', 'kugou', 'qishui', 'spotify'];

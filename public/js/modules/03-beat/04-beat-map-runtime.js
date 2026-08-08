@@ -4,7 +4,8 @@ function smoothBeatMapHandoff(songId, map, token, song) {
   var wait = Math.max(260, Math.min(720, 340 + (beatPulse + beatCam.punch) * 260));
   var apply = function () {
     if (token !== beatMapToken) return;
-    beatMapCache[songId] = map;
+    rememberRuntimeCacheEntry(beatMapCache, songId, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     currentBeatMap = map;
     applyCinemaProfileFromBeatMap(map);
     var t = audio ? audio.currentTime : 0;
@@ -20,7 +21,8 @@ function smoothBeatMapHandoff(songId, map, token, song) {
 
 function applyBeatMapCacheForCurrent(songId, map, token, message) {
   if (!songId || !map || token !== beatMapToken) return false;
-  beatMapCache[songId] = map;
+  rememberRuntimeCacheEntry(beatMapCache, songId, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+    typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
   currentBeatMap = map;
   applyCinemaProfileFromBeatMap(map);
   syncBeatMapPlaybackCursor(audio ? audio.currentTime : 0, true);
@@ -122,4 +124,3 @@ function triggerScheduledBeat(beat) {
 }
 var scheduledBeatPulse = 0;
 var scheduledBeatFlag = false;
-

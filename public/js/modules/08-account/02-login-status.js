@@ -135,7 +135,7 @@ async function refreshLoginStatus(force) {
 }
 
 function normalizeQQLoginStatus(info) {
-  var fallback = { provider: 'qq', loggedIn: false, preview: false, nickname: 'QQ 音乐', userId: '', avatar: '', vipType: 0, svipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, playbackKeyReady: false, vipCheckedAt: 0, vipSource: '', vipProbeAvailable: false, membershipKnown: false, membershipStale: false, authorizationIncomplete: false, vipSyncState: '' };
+  var fallback = { provider: 'qq', loggedIn: false, preview: false, nickname: 'QQ 音乐', userId: '', avatar: '', vipType: 0, svipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, playbackKeyReady: false, loginType: '', vipCheckedAt: 0, vipSource: '', vipProbeAvailable: false, membershipKnown: false, membershipStale: false, authorizationIncomplete: false, vipSyncState: '' };
   if (!info || !info.loggedIn) return Object.assign({}, fallback, info || {}, {
     provider: 'qq',
     loggedIn: false,
@@ -154,6 +154,8 @@ function normalizeQQLoginStatus(info) {
     membershipKnown: !!(info && info.membershipKnown),
     membershipStale: !!(info && info.membershipStale),
     authorizationIncomplete: !!(info && info.authorizationIncomplete),
+    loginType: info && info.loginType || '',
+    cookieState: info && info.cookieState || null,
     vipSyncState: info && info.vipSyncState || ''
   });
   return Object.assign({}, fallback, info, {
@@ -168,6 +170,7 @@ function normalizeQQLoginStatus(info) {
     isVip: !!info.isVip,
     isSvip: !!info.isSvip,
     playbackKeyReady: !!info.playbackKeyReady,
+    loginType: info.loginType || '',
     stale: !!info.stale || !!(info.profileUnavailable && !(info.nickname && info.avatar)),
     vipCheckedAt: Number(info.vipCheckedAt || 0) || 0,
     vipSource: info.vipSource || '',
@@ -200,7 +203,15 @@ function qqMembershipLabel(status) {
 }
 function qqLoginStatusText(info) {
   info = normalizeQQLoginStatus(info || qqLoginStatus);
-  if (!info.loggedIn) return '点击“扫码登录”打开 QQ 音乐官方窗口';
+  if (!info.loggedIn) {
+    var cs = info.cookieState || {};
+    if (cs.wechatHints) return '检测到微信登录残留 · 请改用 QQ 号扫码登录（微信通道不可用）';
+    if (cs.hasFile && !cs.hasUin) return 'QQ 登录未完成 · 请用 QQ 号扫码并等待进入播放器页';
+    if (cs.hasFile && !cs.hasMusicKey) return 'QQ 号已连接 · 播放授权未完成，请重新扫码';
+    return '点击“扫码登录”打开 QQ 音乐官方窗口（请选 QQ 扫码，非微信）';
+  }
+  if (info.loginType === 'wechat') return '微信登录仅支持播放与读取 · 红心/歌单写操作请改用 QQ 号扫码登录';
+  if (info.loginType === 'oauth') return 'OAuth 授权仅支持播放与读取 · 红心/歌单写操作请改用 QQ 号扫码登录';
   if (qqLoginNeedsAuthorizationRefresh(info)) return 'QQ 网页会话已连接 · 播放授权尚未完成';
   if (qqMembershipNeedsSync(info)) return '已保存 QQ 音乐播放授权 · 会员状态待同步';
   var syncText = info.vipCheckedAt ? ' · 会员已复验' : '';
@@ -349,7 +360,14 @@ async function refreshKugouLoginStatus() {
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'kugou'; });
       playlistCatalogRevision += 1;
       homeDiscoverState.loaded = false;
-    } else if ((fx && fx.shelfMergeCollections) ? !kugouPlaylists.length : !userPlaylists.some(function (pl) { return pl && pl.provider === 'kugou'; })) {
+    } else if (typeof kugouPlaylistCatalogNeedsRefresh === 'function' &&
+      kugouPlaylistCatalogNeedsRefresh(
+        kugouLoginStatus,
+        (fx && fx.shelfMergeCollections)
+          ? kugouPlaylists.length > 0
+          : userPlaylists.some(function (pl) { return pl && pl.provider === 'kugou'; }),
+        typeof playlistCatalogProviderSyncFailed === 'function' && playlistCatalogProviderSyncFailed('kugou')
+      )) {
       homeDiscoverState.loaded = false;
       homeDiscoverState.loggedIn = true;
       refreshUserPlaylists(true);

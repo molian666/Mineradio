@@ -202,7 +202,7 @@ test('合并歌单：缓存与目录源不匹配时视为 miss 重新拉取（�
 test('合并开启时 4 处平台登录刷新判断改用平台歌单数组（修复"正在加载其他歌单"恒显示）', () => {
   const loginStatus = fs.readFileSync(path.join(root, '08-account', '02-login-status.js'), 'utf8');
   assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !qqPlaylists\.length/);
-  assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !kugouPlaylists\.length/);
+  assert.match(loginStatus, /kugouPlaylistCatalogNeedsRefresh\(\s*kugouLoginStatus/);
   assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !qishuiPlaylists\.length/);
   assert.match(loginStatus, /\(fx && fx\.shelfMergeCollections\) \? !spotifyPlaylists\.length/);
 });

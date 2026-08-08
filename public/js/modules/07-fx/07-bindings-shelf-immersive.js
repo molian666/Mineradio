@@ -411,7 +411,10 @@ function toggleFx(key) {
   if (key === 'lyricCameraLock' || key === 'lyricGlow' || key === 'lyricGlowBeat' || key === 'lyricGlowParticles' || key === 'lyricVerticalFloat' || key === 'backgroundStarRiver' || key === 'lyricPauseHold' || key === 'bloom' || key === 'edge' || key === 'cinema' || key === 'aiDepth' || key === 'desktopLyrics' || key === 'desktopLyricsClickThrough' || key === 'desktopLyricsCinema' || key === 'desktopLyricsHighlight' || key === 'wallpaperMode' || key === 'sonicGroundFloatingEnabled' || key === 'sonicAudioMonitorEnabled' || key === 'sonicAudioAutoTrack' || key === 'shelfShowPodcasts' || key === 'shelfMergeCollections' || key === 'liveBackgroundKeep' || key === 'memoryAutoTrimApp' || key === 'memoryAutoTrimOnBackground' || key === 'memoryAutoSystemTrim' || key === 'memorySystemAutoElevate') saveLyricLayout({ user: true, reason: key });
   if ((key === 'sonicAudioMonitorEnabled' || key === 'sonicAudioAutoTrack') && typeof refreshSonicAudioMonitorUi === 'function') refreshSonicAudioMonitorUi();
   if (key === 'floatLayer') { if (fx.floatLayer) createFloatLayer(); else destroyFloatLayer(); saveLyricLayout({ user: true, reason: key }); }
-  if (key === 'desktopLyrics') applyDesktopLyricsState(true);
+  if (key === 'desktopLyrics') {
+    applyDesktopLyricsState(true);
+    if (typeof updateLyricsToggleBtnState === 'function') updateLyricsToggleBtnState();
+  }
   if (key === 'desktopLyricsClickThrough' || key === 'desktopLyricsCinema' || key === 'desktopLyricsHighlight') pushDesktopLyricsState(true);
   if (key === 'lyricGlow' || key === 'lyricGlowBeat' || key === 'lyricGlowParticles') pushDesktopLyricsState(true);
   if (key === 'backgroundStarRiver') {
@@ -645,6 +648,7 @@ function setParticleLyricsSilently(on) {
     if (typeof scheduleStageLyricFullTrackWarmup === 'function') scheduleStageLyricFullTrackWarmup('track-ready', 220);
   } else clearStageLyrics();
   lyricsVisible = fx.particleLyrics;
+  if (typeof updateLyricsToggleBtnState === 'function') updateLyricsToggleBtnState();
 }
 
 function updateImmersiveButton() {

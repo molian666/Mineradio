@@ -727,6 +727,7 @@ function applyFxArchiveSnapshot(snapshot) {
   applyWallpaperModeState(true);
   updateRenderPowerClasses();
   applyRendererPowerMode();
+  if (typeof updateLyricsToggleBtnState === 'function') updateLyricsToggleBtnState();
   saveLyricLayout({ user: true, reason: 'archiveApply' });
   return true;
 }

@@ -1396,6 +1396,7 @@ async function playQueueAt(idx, opts) {
           var djTok = djBeatMapToken;
           var djKey = djSongKey(song);
           if (djBeatMapCache[djKey]) {
+            touchRuntimeCacheEntry(djBeatMapCache, djKey);
             currentDjBeatMap = djBeatMapCache[djKey];
             applyPodcastDjProfileFromMap(currentDjBeatMap);
             syncPodcastDjMapCursor(audio ? audio.currentTime : 0, true);
@@ -1411,6 +1412,7 @@ async function playQueueAt(idx, opts) {
           maybeAnnounceDjMode();
         } else if (bmKey && beatMapCache[bmKey]) {
           // 如果缓存有, 直接用
+          touchRuntimeCacheEntry(beatMapCache, bmKey);
           currentBeatMap = beatMapCache[bmKey];
           applyCinemaProfileFromBeatMap(currentBeatMap);
           syncBeatMapPlaybackCursor(audio ? audio.currentTime : 0, albumGaplessMixed);
@@ -1531,9 +1533,13 @@ async function playQueueAt(idx, opts) {
         });
       } else if (!qualitySwitch) {
         if (!earlyLyricFetchStarted) fetchLyric(song, token);
+        // 实际播放源（平台/录音版本）解析完成后，若与早期歌词请求不一致，重新获取对应平台歌词
+        if (typeof ensureLyricMatchesResolvedSource === 'function') ensureLyricMatchesResolvedSource(song, token);
       } else {
         if (typeof cancelPendingTrackFallbackLyrics === 'function') cancelPendingTrackFallbackLyrics();
         if (typeof markStageLyricsPlaybackResume === 'function') markStageLyricsPlaybackResume('quality-switch-lyrics-kept');
+        // 音质切换也可能解析到不同录音（sourceMatch），歌词身份同样需要跟随实际播放源
+        if (typeof ensureLyricMatchesResolvedSource === 'function') ensureLyricMatchesResolvedSource(song, token);
       }
       if (!qualitySwitch) {
         safeRenderQueuePanel('play-queue-at');

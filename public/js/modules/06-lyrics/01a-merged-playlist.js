@@ -42,7 +42,7 @@ function mergedSourceRecord(source, tracks) {
     creator: source.creator || '',
     subscribed: !!source.subscribed,
     signature: source.signature || mergedSourceSignature(source),
-    tracks: (tracks || []).map(cloneMergedTrack).filter(Boolean),
+    tracks: filterMergedLocallyRemovedTracks(tracks, source).map(cloneMergedTrack).filter(Boolean),
   };
   // 保留 revision 字段，保证从缓存恢复（restoreMergedPlaylistCatalogCache →
   // buildMergedPlaylistRecord）后 mergedSourceSignature 能重建出与保存时一致
@@ -59,7 +59,10 @@ function normalizeMergedCacheSnapshot(snapshot, accountKey) {
   var sources = Array.isArray(snapshot.sources) ? snapshot.sources.map(function (source) {
     return mergedSourceRecord(source, source && source.tracks);
   }).filter(function (source) { return source.provider && source.id; }) : [];
-  var tracks = Array.isArray(snapshot.tracks) ? snapshot.tracks.map(cloneMergedTrack).filter(Boolean) : [];
+  var tracks = Array.isArray(snapshot.tracks) ? snapshot.tracks.map(cloneMergedTrack).filter(Boolean).filter(function (track) {
+    var source = { provider: track.sourcePlaylistProvider || track.provider, id: track.sourcePlaylistId || '' };
+    return !source.id || !mergedTrackLocallyRemoved(track, source);
+  }) : [];
   return {
     version: MERGED_PLAYLIST_CACHE_VERSION,
     accountKey: String(snapshot.accountKey || accountKey || 'anonymous'),
@@ -70,6 +73,123 @@ function normalizeMergedCacheSnapshot(snapshot, accountKey) {
     errors: Array.isArray(snapshot.errors) ? snapshot.errors.map(function (error) { return Object.assign({}, error); }) : [],
     savedAt: Number(snapshot.savedAt) || 0,
   };
+}
+
+// ---------- 合并歌单本地收藏 ----------
+// 平台写操作（如 QQ 音乐收藏）不可用时，歌曲先加入合并歌单的"本地收藏"
+// 来源（仅存本地），可播放、可从合并歌单移除；同步到平台暂未实现时提示用户。
+var MERGED_LOCAL_COLLECT_STORE_KEY = 'mineradio-merged-local-collect-v1';
+var MERGED_LOCAL_COLLECT_SOURCE_ID = 'local-collect';
+function readMergedLocalCollectSongs() {
+  try {
+    var raw = localStorage.getItem(MERGED_LOCAL_COLLECT_STORE_KEY);
+    var list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter(Boolean) : [];
+  } catch (_) { return []; }
+}
+function saveMergedLocalCollectSongs(list) {
+  try {
+    localStorage.setItem(MERGED_LOCAL_COLLECT_STORE_KEY, JSON.stringify(list || []));
+    return true;
+  } catch (_) { return false; }
+}
+function mergedLocalCollectKey(song) {
+  song = song || {};
+  var id = String(song.id || song.mid || song.songmid || song.localKey || '');
+  var provider = String(song.provider || song.source || '');
+  var key = (provider && id) ? (provider + ':' + id) : '';
+  if (!key) key = JSON.stringify([song.name || '', song.artist || '']);
+  return key;
+}
+function mergedHasLocalCollectSong(song) {
+  if (!song) return false;
+  var key = mergedLocalCollectKey(song);
+  return readMergedLocalCollectSongs().some(function (item) {
+    return mergedLocalCollectKey(item) === key;
+  });
+}
+function mergedAddLocalCollectSong(song) {
+  if (!song) return false;
+  var list = readMergedLocalCollectSongs();
+  var key = mergedLocalCollectKey(song);
+  if (list.some(function (item) { return mergedLocalCollectKey(item) === key; })) return true;
+  var entry = Object.assign({}, song);
+  if (!entry.provider) entry.provider = (typeof songAccountProvider === 'function' ? songAccountProvider(song) : '') || 'netease';
+  entry.sourcePlaylistId = MERGED_LOCAL_COLLECT_SOURCE_ID;
+  entry.sourcePlaylistProvider = MERGED_PLAYLIST_PROVIDER;
+  entry.localCollect = true;
+  list.push(entry);
+  return saveMergedLocalCollectSongs(list);
+}
+function mergedRemoveLocalCollectSong(song) {
+  if (!song) return false;
+  var key = mergedLocalCollectKey(song);
+  return saveMergedLocalCollectSongs(readMergedLocalCollectSongs().filter(function (item) {
+    return mergedLocalCollectKey(item) !== key;
+  }));
+}
+function mergedLocalCollectSource() {
+  var tracks = readMergedLocalCollectSongs().map(function (song) {
+    return Object.assign({}, song, {
+      provider: song.provider,
+      sourcePlaylistId: MERGED_LOCAL_COLLECT_SOURCE_ID,
+      sourcePlaylistProvider: MERGED_PLAYLIST_PROVIDER,
+      localCollect: true,
+    });
+  });
+  return { provider: MERGED_PLAYLIST_PROVIDER, id: MERGED_LOCAL_COLLECT_SOURCE_ID, name: '本地收藏', trackCount: tracks.length, tracks: tracks };
+}
+
+// QQ 合并歌单移除不调用平台接口时，记录本地排除项，避免下一次重建又把歌曲拉回合并歌单。
+var MERGED_LOCAL_REMOVE_STORE_KEY = 'mineradio-merged-local-removals-v1';
+function mergedTrackRemovalIdentity(song, source) {
+  song = song || {};
+  source = source || {};
+  var provider = String(song.provider || song.source || source.provider || '');
+  var id = typeof mergedTrackProviderId === 'function' ? mergedTrackProviderId(song) : (song.id || song.mid || song.songmid || '');
+  var meta = typeof mergedTrackMetaKey === 'function' ? mergedTrackMetaKey(song) : '';
+  var identity = id ? 'id:' + String(id) : (meta ? 'meta:' + meta : '');
+  return provider && identity ? provider + '|' + identity : '';
+}
+function mergedLocalRemovalKey(song, source) {
+  source = source || {};
+  var accountKey = typeof currentMergedPlaylistAccountKey === 'function'
+    ? String(currentMergedPlaylistAccountKey() || 'anonymous')
+    : 'anonymous';
+  var sourceProvider = String(source.provider || '');
+  var sourceId = String(source.id || '');
+  var trackKey = mergedTrackRemovalIdentity(song, source);
+  return sourceProvider && sourceId && trackKey ? accountKey + '|' + sourceProvider + ':' + sourceId + '|' + trackKey : '';
+}
+function readMergedLocalRemovals() {
+  try {
+    var raw = localStorage.getItem(MERGED_LOCAL_REMOVE_STORE_KEY);
+    var list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter(function (key) { return typeof key === 'string' && key; }) : [];
+  } catch (_) { return []; }
+}
+function saveMergedLocalRemovals(list) {
+  try {
+    localStorage.setItem(MERGED_LOCAL_REMOVE_STORE_KEY, JSON.stringify(list || []));
+    return true;
+  } catch (_) { return false; }
+}
+function mergedTrackLocallyRemoved(song, source) {
+  var key = mergedLocalRemovalKey(song, source);
+  return !!key && readMergedLocalRemovals().indexOf(key) >= 0;
+}
+function filterMergedLocallyRemovedTracks(tracks, source) {
+  return (Array.isArray(tracks) ? tracks : []).filter(function (track) {
+    return !mergedTrackLocallyRemoved(track, source);
+  });
+}
+function mergedAddLocalRemoval(song, source) {
+  var key = mergedLocalRemovalKey(song, source);
+  if (!key) return false;
+  var list = readMergedLocalRemovals();
+  if (list.indexOf(key) >= 0) return true;
+  list.push(key);
+  return saveMergedLocalRemovals(list);
 }
 
 function createMergedPlaylistCacheAdapter(storage) {
@@ -202,6 +322,10 @@ function dedupeMergedTrackLists(sourceRows) {
       if (!track) return;
       var normalized = cloneMergedTrack(track);
       if (!normalized.provider) normalized.provider = source.provider;
+      // 记录来源歌单 id 与平台，供合并歌单详情中"从歌单移除"定位到对应平台歌单
+      if (normalized.sourcePlaylistId == null) normalized.sourcePlaylistId = source.id;
+      if (normalized.sourcePlaylistProvider == null) normalized.sourcePlaylistProvider = source.provider;
+      if (mergedTrackLocallyRemoved(normalized, source)) return;
       var providerId = mergedTrackProviderId(normalized);
       var providerKey = providerId ? normalized.provider + ':' + providerId : '';
       var metaKey = mergedTrackMetaKey(normalized);
@@ -223,6 +347,9 @@ function mergeMergedPlaylistSnapshot(previous, sourceRows, changedSourceTracks, 
     var old = previous.sources.find(function (item) { return mergedSourceKey(item) === key; });
     return mergedSourceRecord(source, hasChangedTracks ? changedSourceTracks[key] : (old && old.tracks || []));
   });
+  // 合并歌单本地收藏（平台写不可用时加入的歌曲）作为虚拟来源始终参与组装
+  var localCollect = mergedLocalCollectSource();
+  if (localCollect && localCollect.tracks.length) currentSources.push(localCollect);
   var currentKeys = Object.create(null);
   currentSources.forEach(function (source) { currentKeys[mergedSourceKey(source)] = true; });
   var retainedErrors = (previous.errors || []).filter(function (error) {
@@ -254,6 +381,9 @@ async function fetchAllMergedSourceTracks(source, fetchPage, pageSize) {
       var normalized = cloneMergedTrack(track);
       if (normalized) {
         if (!normalized.provider) normalized.provider = source.provider;
+        if (normalized.sourcePlaylistId == null) normalized.sourcePlaylistId = source.id;
+        if (normalized.sourcePlaylistProvider == null) normalized.sourcePlaylistProvider = source.provider;
+        if (mergedTrackLocallyRemoved(normalized, source)) return;
         tracks.push(normalized);
       }
     });
@@ -550,9 +680,12 @@ function mergedPlaylistSnapshotSourcesMatch(recordSources, snapshot) {
   var rows = (recordSources || []).filter(function (playlist) {
     return playlist && playlist.provider && playlist.id != null;
   });
-  if (!rows.length || rows.length !== snapshot.sources.length) return false;
+  var snapshotSources = snapshot.sources.filter(function (source) {
+    return !(source && source.provider === MERGED_PLAYLIST_PROVIDER && String(source.id || '') === String(MERGED_LOCAL_COLLECT_SOURCE_ID));
+  });
+  if (!rows.length || rows.length !== snapshotSources.length) return false;
   var snapshotKeys = Object.create(null);
-  (snapshot.sources || []).forEach(function (source) { snapshotKeys[mergedSourceKey(source)] = true; });
+  snapshotSources.forEach(function (source) { snapshotKeys[mergedSourceKey(source)] = true; });
   for (var i = 0; i < rows.length; i += 1) {
     if (!snapshotKeys[mergedSourceKey(rows[i])]) return false;
   }
@@ -619,6 +752,9 @@ function createMergedPlaylistPager(sources, fetchPage) {
         if (!track) return;
         var normalized = Object.assign({}, track);
         if (!normalized.provider) normalized.provider = source.provider;
+        if (normalized.sourcePlaylistId == null) normalized.sourcePlaylistId = source.id;
+        if (normalized.sourcePlaylistProvider == null) normalized.sourcePlaylistProvider = source.provider;
+        if (mergedTrackLocallyRemoved(normalized, source)) return;
         var providerId = mergedTrackProviderId(normalized);
         var providerKey = providerId ? normalized.provider + ':' + providerId : '';
         var metaKey = mergedTrackMetaKey(normalized);

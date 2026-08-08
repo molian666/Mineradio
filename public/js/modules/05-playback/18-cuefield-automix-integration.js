@@ -80,6 +80,7 @@ function cuefieldAutoMixAudioDescriptor(song) {
 function cuefieldAutoMixAudioDescriptorNative(song) {
   var key = cuefieldSongKey(song);
   var cached = key && cuefieldAudioDescriptorCache[key];
+  if (cached) touchRuntimeCacheEntry(cuefieldAudioDescriptorCache, key);
   if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached);
   return Promise.resolve(typeof fetchBeatPrefetchAudioUrl === 'function' ? fetchBeatPrefetchAudioUrl(song) : null).then(function (proxyUrl) {
     if (!proxyUrl) return null;
@@ -88,7 +89,7 @@ function cuefieldAutoMixAudioDescriptorNative(song) {
       playbackData: { url: proxyUrl, source: songProviderKey(song), level: '' },
       expiresAt: Date.now() + 4 * 60 * 1000
     };
-    if (key) cuefieldAudioDescriptorCache[key] = descriptor;
+    if (key) rememberRuntimeCacheEntry(cuefieldAudioDescriptorCache, key, descriptor, RUNTIME_RENDER_CACHE_LIMITS.cuefieldDescriptors, null);
     return descriptor;
   });
 }
@@ -135,7 +136,8 @@ async function ensureCuefieldAutoMixBeatMap(song, key, context) {
   if (!song || !key) return false;
   if (beatMapCache[key]) return true;
   if (context && context.currentIndex === currentIdx && currentBeatMap && key === cuefieldSongKey(playQueue[currentIdx])) {
-    beatMapCache[key] = currentBeatMap;
+    rememberRuntimeCacheEntry(beatMapCache, key, currentBeatMap, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     if (typeof writeBeatDiskCache === 'function') {
       try { await writeBeatDiskCache(key, currentBeatMap, song, 'cuefield'); } catch (_) { }
     }
@@ -158,7 +160,8 @@ async function ensureCuefieldAutoMixBeatMap(song, key, context) {
     song: song
   });
   if (!map || !contextStillCurrent() || analysisToken !== beatMapToken) return false;
-  beatMapCache[key] = map;
+  rememberRuntimeCacheEntry(beatMapCache, key, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+    typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
   if (typeof writeBeatDiskCache === 'function') await writeBeatDiskCache(key, map, song, 'cuefield');
   return true;
 }

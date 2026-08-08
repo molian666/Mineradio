@@ -189,14 +189,16 @@ function applyLocalBeatMap(song, mode, map, fromCache) {
     currentBeatMap = null;
     beatMapNextIdx = 0;
     currentDjBeatMap = map;
-    djBeatMapCache[djSongKey(song)] = map;
+    rememberRuntimeCacheEntry(djBeatMapCache, djSongKey(song), map, RUNTIME_RENDER_CACHE_LIMITS.djBeatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     applyPodcastDjProfileFromMap(map);
     syncPodcastDjMapCursor(audio ? audio.currentTime : 0, true);
     maybeAnnounceDjMode();
   } else {
     setDjModeActive(false, song);
     currentBeatMap = map;
-    beatMapCache['local:' + song.localKey] = map;
+    rememberRuntimeCacheEntry(beatMapCache, 'local:' + song.localKey, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     applyCinemaProfileFromBeatMap(map);
     syncBeatMapPlaybackCursor(audio ? audio.currentTime : 0, true);
   }
@@ -361,4 +363,3 @@ async function startLocalBeatAnalysis(mode) {
     showToast('本地节奏分析失败');
   }
 }
-

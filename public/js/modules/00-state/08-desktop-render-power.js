@@ -148,6 +148,57 @@ function updateRenderPowerClasses() {
 function safeObjectKeys(obj) {
   try { return obj ? Object.keys(obj) : []; } catch (e) { return []; }
 }
+var RUNTIME_RENDER_CACHE_LIMITS = {
+  playlistCovers: 256,
+  beatMaps: 128,
+  djBeatMaps: 64,
+  cuefieldDescriptors: 128
+};
+var runtimeCacheOrderStore = typeof WeakMap === 'function' ? new WeakMap() : null;
+function runtimeCacheOrder(cache) {
+  if (!cache || !runtimeCacheOrderStore) return null;
+  var order = runtimeCacheOrderStore.get(cache);
+  if (!order) {
+    order = [];
+    runtimeCacheOrderStore.set(cache, order);
+  }
+  return order;
+}
+function touchRuntimeCacheEntry(cache, key) {
+  if (!cache || key == null || !runtimeCacheOrderStore) return;
+  var order = runtimeCacheOrder(cache);
+  key = String(key);
+  var index = order.indexOf(key);
+  if (index >= 0) order.splice(index, 1);
+  if (Object.prototype.hasOwnProperty.call(cache, key)) order.push(key);
+}
+function rememberRuntimeCacheEntry(cache, key, value, limit, protectedKeys) {
+  if (!cache || key == null) return value;
+  key = String(key);
+  var order = runtimeCacheOrder(cache);
+  cache[key] = value;
+  if (!order) return value;
+  var index = order.indexOf(key);
+  if (index >= 0) order.splice(index, 1);
+  order.push(key);
+  var maxEntries = Math.max(1, Number(limit) || 1);
+  while (order.length > maxEntries) {
+    var candidateIndex = -1;
+    for (var i = 0; i < order.length; i++) {
+      var candidateKey = order[i];
+      var candidateValue = cache[candidateKey];
+      if (protectedKeys && protectedKeys[candidateKey]) continue;
+      if (candidateValue && candidateValue.loading) continue;
+      candidateIndex = i;
+      break;
+    }
+    if (candidateIndex < 0) break;
+    var evictedKey = order[candidateIndex];
+    delete cache[evictedKey];
+    order.splice(candidateIndex, 1);
+  }
+  return value;
+}
 function markProtectedKey(map, key) {
   if (key) map[String(key)] = true;
 }
@@ -265,6 +316,7 @@ function collectRuntimePerfSnapshot(now) {
     djBeatMaps: safeObjectKeys(djBeatMapCache).length,
     stageLyricTrack: (typeof stageLyricTrackCache !== 'undefined' && stageLyricTrackCache && stageLyricTrackCache.entries) ? stageLyricTrackCache.entries.length : 0
   };
+  runtimePerfState.cacheLimits = RUNTIME_RENDER_CACHE_LIMITS;
   if (performance && performance.memory && now - runtimePerfState.lastHeapSampleAt > 12000) {
     runtimePerfState.lastHeapSampleAt = now;
     runtimePerfState.heapMB = Math.round((performance.memory.usedJSHeapSize || 0) / 1048576);

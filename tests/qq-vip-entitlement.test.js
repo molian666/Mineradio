@@ -468,7 +468,7 @@ function testDesktopReauthCookieSelectionAndBudgets() {
     'a current WeChat QQ Music session must not be paired with a stale QQ uin'
   );
   assert(
-    /if \(!qqCookieUin\(obj\) \|\| !qqCookiePlaybackKey\(obj\)\)/.test(serverSource),
+    /const hasUin = !!qqCookieUin\(obj\);[\s\S]{0,300}?if \(!hasUin \|\| !hasPlaybackKey\)/.test(serverSource),
     'the server must refuse to persist a partial QQ web-only cookie'
   );
 

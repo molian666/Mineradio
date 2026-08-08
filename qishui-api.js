@@ -2934,6 +2934,29 @@ async function handleQishuiPlaylistAddSong(playlistId, track, cookieText) {
   };
 }
 
+async function handleQishuiPlaylistRemoveSong(playlistId, track, cookieText) {
+  const playlistIdValue = normalizeText(String(playlistId || '').replace(/^qishui:/i, ''));
+  const trackId = normalizeText(track && typeof track === 'object'
+    ? (track.providerSongId || track.trackId || track.track_id || track.id)
+    : track);
+  if (!playlistIdValue || !trackId) throw new Error('Missing Qishui playlist or track id');
+  // 与 /luna/pc/me/playlist/media/append 对称的删除端点；汽水未公开文档，
+  // 失败时上层会提示移除失败，不影响其他平台。
+  await qishuiPcPostJson('/luna/pc/me/playlist/media/delete', {
+    playlist_id: playlistIdValue,
+    media: [{ id: trackId, type: 'track' }],
+  }, cookieText, { errorCode: 'QISHUI_PLAYLIST_REMOVE_FAILED' });
+  invalidateQishuiLibraryCaches();
+  return {
+    provider: 'qishui',
+    loggedIn: true,
+    pid: playlistIdValue,
+    id: trackId,
+    success: true,
+    ok: true,
+  };
+}
+
 async function handleQishuiSetAlbumCollected(albumId, collected, cookieText) {
   const id = normalizeText(albumId);
   if (!id) throw new Error('Missing Qishui album id');
@@ -3493,6 +3516,7 @@ module.exports = {
   handleQishuiSetTrackLiked,
   handleQishuiSetPlaylistCollected,
   handleQishuiPlaylistAddSong,
+  handleQishuiPlaylistRemoveSong,
   handleQishuiSetAlbumCollected,
   handleQishuiReportRecentlyPlayed,
   handleQishuiComments,

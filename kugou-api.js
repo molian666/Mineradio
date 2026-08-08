@@ -776,7 +776,7 @@ function buildKugouH5Params(auth, extra) {
 async function kugouH5GatewayRequest(path, opts) {
   opts = opts || {};
   const auth = extractKugouAuth(opts.cookie || '');
-  if (!auth.playbackReady) throw new Error('KUGOU_AUTH_REQUIRED');
+  if (!auth.playbackReady && !(opts.allowLoggedIn && auth.loggedIn)) throw new Error('KUGOU_AUTH_REQUIRED');
   const bodyObj = opts.body == null ? null : (typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body);
   const bodyText = bodyObj == null ? '' : JSON.stringify(bodyObj);
   const params = buildKugouH5Params(auth, opts.params || {});
@@ -795,6 +795,28 @@ async function kugouH5GatewayRequest(path, opts) {
     throw err;
   }
   return json;
+}
+
+function kugouGatewayProviderErrorCode(error) {
+  let body = error && error.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (_) { body = null; }
+  }
+  return Math.max(0, Number(body && (body.error_code != null ? body.error_code : body.code)) || 0);
+}
+
+function classifyKugouPlaylistSessionFailure(auth, error) {
+  const providerErrorCode = kugouGatewayProviderErrorCode(error);
+  const reauthRequired = providerErrorCode === 20017;
+  return {
+    validated: false,
+    playlistReady: false,
+    reauthRequired,
+    providerErrorCode,
+    error: reauthRequired
+      ? 'KUGOU_SESSION_REJECTED'
+      : String(error && error.message || 'KUGOU_PLAYLIST_FAILED'),
+  };
 }
 
 function parseKugouListId(playlistId) {
@@ -1384,7 +1406,8 @@ async function handleKugouLyric(hash, albumAudioId, durationSec) {
   u.searchParams.set('hash', fileHash);
   if (albumAudioId) u.searchParams.set('album_audio_id', albumAudioId);
   const search = await requestJson(u.toString(), { headers: KUGOU_HEADERS });
-  const candidate = search && Array.isArray(search.candidates) && search.candidates[0];
+  // 同一 hash 可能对应多版本歌词（时长不同），优先选与所播音频时长最接近的候选，避免 Live/重制版错位
+  const candidate = pickKugouLyricCandidateByDuration(search && search.candidates, durationSec);
   if (!candidate || !candidate.id) {
     return { provider: 'kugou', hash: fileHash, lyric: '', trans: '' };
   }
@@ -1398,6 +1421,27 @@ async function handleKugouLyric(hash, albumAudioId, durationSec) {
   const lyricJson = await requestJson(dl.toString(), { headers: KUGOU_HEADERS });
   const lyric = decodeKugouLyricContent(lyricJson && lyricJson.content);
   return { provider: 'kugou', hash: fileHash, lyric, trans: '' };
+}
+
+function pickKugouLyricCandidateByDuration(candidates, durationSec) {
+  if (!Array.isArray(candidates) || !candidates.length) return null;
+  const targetSec = Math.max(0, Number(durationSec) || 0);
+  if (!targetSec) return candidates[0];
+  let best = null;
+  let bestDelta = Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i] || {};
+    if (!c.id) continue;
+    // duration 单位不统一（秒或毫秒），按 >1000 视为毫秒归一化；durationSec 恒为秒
+    let rawDur = 0;
+    if (c.duration != null && c.duration !== '') rawDur = Number(c.duration);
+    else if (c.durationSec != null && c.durationSec !== '') rawDur = Number(c.durationSec);
+    else if (c.duration_ms != null && c.duration_ms !== '') rawDur = Number(c.duration_ms) / 1000;
+    const cDur = isFinite(rawDur) && rawDur > 1000 ? rawDur / 1000 : rawDur;
+    const delta = cDur > 0 ? Math.abs(cDur - targetSec) : Infinity;
+    if (delta < bestDelta) { bestDelta = delta; best = c; }
+  }
+  return best || candidates[0];
 }
 
 function kugouUnknownWebMembershipPayload() {
@@ -1585,6 +1629,14 @@ async function getKugouLoginInfo(cookie) {
   const vipProbe = await fetchKugouVipInfo(cookie, auth).catch(() => null);
   const vip = normalizeKugouVipPayloadV2(vipProbe, auth);
   const nickname = auth.nickname || profile.nickname || (auth.loggedIn ? ('酷狗 ' + (auth.userid || '用户')) : '酷狗音乐');
+  console.log('[KugouPlaylistSync][backend] login-status', {
+    loggedIn: !!auth.loggedIn,
+    playbackReady: !!auth.playbackReady,
+    hasCookie: !!cookie,
+    hasUserId: !!auth.userid,
+    hasSessionToken: !!auth.token,
+    hasMid: !!auth.mid,
+  });
   return {
     provider: 'kugou',
     loggedIn: auth.loggedIn,
@@ -1659,7 +1711,7 @@ function pickKugouProfileFromLists(lists, auth) {
 
 async function fetchKugouProfileFromPlaylists(cookie, auth) {
   auth = auth || extractKugouAuth(cookie);
-  if (!auth.playbackReady) return {};
+  if (!auth.loggedIn) return {};
   const cacheKey = kugouProfileCacheKey(auth);
   return kugouProfileCache.wrap(cacheKey, 5 * 60 * 1000, async () => {
     const json = await kugouH5GatewayRequest('/v7/get_all_list', {
@@ -1675,6 +1727,7 @@ async function fetchKugouProfileFromPlaylists(cookie, auth) {
         page: 1,
         pagesize: 20,
       },
+      allowLoggedIn: true,
     });
     const data = (json && json.data) || {};
     return pickKugouProfileFromLists(extractKugouGatewayPlaylistLists(data), auth);
@@ -1722,48 +1775,108 @@ function mapKugouPlaylistTrack(item) {
   return mapped;
 }
 
+async function requestKugouUserPlaylistCatalog(cookie, auth, pageSize) {
+  const resolvedAuth = auth || extractKugouAuth(cookie);
+  return kugouH5GatewayRequest('/v7/get_all_list', {
+    method: 'POST',
+    cookie,
+    router: 'cloudlist.service.kugou.com',
+    params: { plat: 1 },
+    body: {
+      userid: Number(resolvedAuth.userid),
+      token: resolvedAuth.token,
+      total_ver: 979,
+      type: 2,
+      page: 1,
+      pagesize: Math.max(1, Math.min(50, Number(pageSize) || 50)),
+    },
+    allowLoggedIn: true,
+  });
+}
+
+async function validateKugouPlaylistSession(cookie) {
+  const auth = extractKugouAuth(cookie);
+  const base = {
+    provider: 'kugou',
+    loggedIn: !!auth.loggedIn,
+    playbackReady: !!auth.playbackReady,
+  };
+  if (!auth.loggedIn) {
+    return Object.assign(base, {
+      validated: false,
+      playlistReady: false,
+      reauthRequired: false,
+      providerErrorCode: 0,
+      error: 'KUGOU_AUTH_REQUIRED',
+    });
+  }
+  try {
+    await requestKugouUserPlaylistCatalog(cookie, auth, 1);
+    return Object.assign(base, {
+      validated: true,
+      playlistReady: true,
+      reauthRequired: false,
+      providerErrorCode: 0,
+      error: '',
+    });
+  } catch (error) {
+    return Object.assign(base, classifyKugouPlaylistSessionFailure(auth, error));
+  }
+}
+
 async function handleKugouUserPlaylists(cookie) {
   const auth = extractKugouAuth(cookie);
-  if (!auth.playbackReady) {
+  console.log('[KugouPlaylistSync][backend] request', {
+    loggedIn: !!auth.loggedIn,
+    playbackReady: !!auth.playbackReady,
+    hasUserId: !!auth.userid,
+    hasSessionToken: !!auth.token,
+    hasMid: !!auth.mid,
+  });
+  if (!auth.loggedIn) {
     return { provider: 'kugou', loggedIn: auth.loggedIn, playbackReady: false, playlists: [], error: 'KUGOU_AUTH_REQUIRED', message: '酷狗登录未完成，请重新网页登录' };
   }
   try {
-    const json = await kugouH5GatewayRequest('/v7/get_all_list', {
-      method: 'POST',
-      cookie,
-      router: 'cloudlist.service.kugou.com',
-      params: { plat: 1 },
-      body: {
-        userid: Number(auth.userid),
-        token: auth.token,
-        total_ver: 979,
-        type: 2,
-        page: 1,
-        pagesize: 50,
-      },
-    });
+    const json = await requestKugouUserPlaylistCatalog(cookie, auth, 50);
     const data = (json && json.data) || {};
     const lists = extractKugouGatewayPlaylistLists(data);
     const profile = pickKugouProfileFromLists(lists, auth);
     if (profile.nickname || profile.avatar) kugouProfileCache.set(kugouProfileCacheKey(auth), profile, 5 * 60 * 1000);
     const playlists = lists.map(mapKugouPlaylistItem).filter(pl => pl.id && pl.name);
+    console.log('[KugouPlaylistSync][backend] parsed', {
+      dataKeys: Object.keys(data).slice(0, 16),
+      rawListCount: lists.length,
+      mappedPlaylistCount: playlists.length,
+      playbackReady: !!auth.playbackReady,
+    });
     return {
       provider: 'kugou',
       loggedIn: true,
-      playbackReady: true,
+      playbackReady: auth.playbackReady,
       userId: auth.userid,
       nickname: auth.nickname || profile.nickname || '',
       avatar: auth.avatar || profile.avatar || '',
       playlists,
     };
   } catch (err) {
+    const failure = classifyKugouPlaylistSessionFailure(auth, err);
+    console.warn('[KugouPlaylistSync][backend] failed', {
+      loggedIn: !!auth.loggedIn,
+      playbackReady: !!auth.playbackReady,
+      providerErrorCode: failure.providerErrorCode,
+      reauthRequired: failure.reauthRequired,
+    });
     return {
       provider: 'kugou',
       loggedIn: true,
-      playbackReady: true,
+      playbackReady: auth.playbackReady,
       playlists: [],
-      error: err.message || 'KUGOU_PLAYLIST_FAILED',
-      message: '酷狗歌单加载失败，请稍后重试',
+      error: failure.error,
+      providerErrorCode: failure.providerErrorCode,
+      reauthRequired: failure.reauthRequired,
+      message: failure.reauthRequired
+        ? '酷狗会话已失效，请重新登录'
+        : '酷狗歌单加载失败，请稍后重试',
     };
   }
 }
@@ -1800,6 +1913,8 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
       },
     });
     const data = (json && json.data) || {};
+    const listVersion = extractKugouListVersion(json);
+    if (listVersion) kugouListVersionById.set(cacheKey, listVersion);
     const chunk = data.info || data.songs || data.lists || data.file || [];
     const list = Array.isArray(chunk) ? chunk : (Array.isArray(chunk.file) ? chunk.file : []);
     const tracks = list.map((item, index) => {
@@ -1809,16 +1924,18 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
       return mapped;
     }).filter(s => s.name && (s.hash || s.id));
     const total = Number(data.count || 0) || tracks.length;
-    return { tracks, total };
+    return { tracks, total, listVersion };
   }
   async function fetchOrigRange(origStart, count) {
     const out = [];
+    let listVersion = 0;
     let remaining = count;
     let pos = origStart;
     while (remaining > 0) {
       const pageNo = Math.floor(pos / pagesize) + 1;
       const baseOffset = (pageNo - 1) * pagesize;
       const chunk = await fetchPage(pageNo, baseOffset);
+      if (!listVersion) listVersion = chunk.listVersion || 0;
       if (!chunk.tracks.length) break;
       const inPage = pos - baseOffset;
       const take = Math.min(remaining, chunk.tracks.length - inPage);
@@ -1827,7 +1944,7 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
       remaining -= take;
       pos += take;
     }
-    return out;
+    return { tracks: out, listVersion };
   }
   function reverseKugouTracks(tracks, listOffset) {
     tracks.reverse();
@@ -1849,6 +1966,7 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
           offset,
           limit: pagesize,
           hasMore: false,
+          listVersion: probe.listVersion || 0,
         };
       }
       var origStart = Math.max(0, total - offset - pagesize);
@@ -1863,9 +1981,11 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
           offset,
           limit: pagesize,
           hasMore: false,
+          listVersion: probe.listVersion || kugouListVersionById.get(cacheKey) || 0,
         };
       }
-      var pageTracks = reverseKugouTracks(await fetchOrigRange(origStart, count), offset);
+      var range = await fetchOrigRange(origStart, count);
+      var pageTracks = reverseKugouTracks(range.tracks, offset);
       return {
         provider: 'kugou',
         id: String(playlistId || listid),
@@ -1874,20 +1994,23 @@ async function handleKugouPlaylistTracks(playlistId, cookie, opts = {}) {
         offset,
         limit: pagesize,
         hasMore: offset + pageTracks.length < total,
+        listVersion: probe.listVersion || range.listVersion || kugouListVersionById.get(cacheKey) || 0,
       };
     }
     return kugouPlaylistTracksCache.wrap(cacheKey, null, async () => {
       const tracks = [];
       let total = 0;
+      let listVersion = 0;
       for (let round = 0; round < 500; round++) {
         const chunk = await fetchPage(round + 1, tracks.length);
+        if (!listVersion) listVersion = chunk.listVersion || 0;
         total = chunk.total || total;
         if (!chunk.tracks.length) break;
         tracks.push(...chunk.tracks);
         if (chunk.tracks.length < pagesize || (total && tracks.length >= total)) break;
       }
       reverseKugouTracks(tracks, 0);
-      return { provider: 'kugou', id: String(playlistId || listid), tracks, total: total || tracks.length };
+      return { provider: 'kugou', id: String(playlistId || listid), tracks, total: total || tracks.length, listVersion };
     });
   } catch (err) {
     return {
@@ -1911,17 +2034,71 @@ function kugouAudioReferer(audioUrl) {
 
 let kugouFavoriteListCache = { listId: '', userId: '', at: 0 };
 const kugouLikeFileIdByHash = new Map();
+const kugouListVersionById = new Map();
+
+function isKugouGatewayPlaylistItem(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return [
+    'global_collection_id', 'specialid', 'listid', 'list_id',
+    'list_create_listid', 'listname', 'specialname'
+  ].some(key => value[key] != null && String(value[key]).trim() !== '');
+}
 
 function extractKugouGatewayPlaylistLists(data) {
-  data = (data && data.data) || data || {};
-  if (Array.isArray(data.info)) return data.info;
-  const info = data.info || data;
-  return []
-    .concat(Array.isArray(info.collect) ? info.collect : [])
-    .concat(Array.isArray(info.love) ? info.love : [])
-    .concat(Array.isArray(info.self) ? info.self : [])
-    .concat(Array.isArray(info.list) ? info.list : [])
-    .concat(Array.isArray(data.list) ? data.list : []);
+  const rows = [];
+  const seen = new Set();
+  const visit = (value, depth) => {
+    if (value == null || depth > 5) return;
+    if (Array.isArray(value)) {
+      const playlistRows = value.filter(isKugouGatewayPlaylistItem);
+      if (playlistRows.length) {
+        playlistRows.forEach(item => {
+          const id = String(
+            item.global_collection_id || item.specialid || item.listid ||
+            item.list_id || item.list_create_listid || ''
+          ).trim();
+          const key = id || JSON.stringify(item);
+          if (seen.has(key)) return;
+          seen.add(key);
+          rows.push(item);
+        });
+        return;
+      }
+      value.forEach(item => visit(item, depth + 1));
+      return;
+    }
+    if (typeof value !== 'object') return;
+    Object.keys(value).forEach(key => visit(value[key], depth + 1));
+  };
+  visit((data && data.data) || data || {}, 0);
+  return rows;
+}
+
+function extractKugouListVersion(data) {
+  const keys = ['list_ver', 'listVer', 'list_version', 'listVersion'];
+  const visit = (value, depth) => {
+    if (!value || typeof value !== 'object' || depth > 6) return 0;
+    for (let i = 0; i < keys.length; i += 1) {
+      const raw = value[keys[i]];
+      if (raw == null || raw === '') continue;
+      const version = Number(raw);
+      if (Number.isFinite(version) && version >= 0) return version;
+    }
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) {
+        const version = visit(value[i], depth + 1);
+        if (version) return version;
+      }
+      return 0;
+    }
+    const fields = Object.keys(value);
+    for (let i = 0; i < fields.length; i += 1) {
+      const version = visit(value[fields[i]], depth + 1);
+      if (version) return version;
+    }
+    return 0;
+  };
+  return visit(data, 0);
 }
 
 function isKugouFavoritePlaylistName(name) {
@@ -1995,6 +2172,22 @@ function buildKugouSongResource(song) {
     bitrate: 0,
     album_id: albumId,
     mixsongid: Number(mixsongid) || 0,
+  };
+}
+
+function buildKugouDeleteSongBody(options) {
+  options = options || {};
+  const fileId = String(options.fileId == null ? '' : options.fileId).trim();
+  const numericFileId = Number(fileId);
+  const listVersion = Number(options.listVersion);
+  const normalizedListId = parseKugouListId(options.listId);
+  return {
+    listid: Number(normalizedListId) || normalizedListId,
+    userid: Number(options.userId),
+    token: options.token,
+    type: 0,
+    list_ver: Number.isFinite(listVersion) && listVersion >= 0 ? listVersion : 0,
+    data: [{ fileid: Number.isSafeInteger(numericFileId) ? numericFileId : fileId }],
   };
 }
 
@@ -2075,11 +2268,15 @@ async function handleKugouAddSongToList(listId, song, cookie) {
 
 async function findKugouFavoriteFileId(song, cookie, listId) {
   const hash = String((song && (song.hash || song.fileHash || song.id)) || '').trim().toLowerCase();
-  if (!hash) return '';
-  if (kugouLikeFileIdByHash.has(hash)) return kugouLikeFileIdByHash.get(hash);
+  if (!hash) return { fileId: '', listVersion: 0 };
   listId = String(listId || '').trim() || await resolveKugouFavoriteListId(cookie);
-  if (!listId) return '';
-  for (let page = 1; page <= 6; page += 1) {
+  if (!listId) return { fileId: '', listVersion: 0 };
+  const auth = extractKugouAuth(cookie);
+  const listKey = String(listId) + ':' + String(auth.userid || '0');
+  // 扫描歌单定位 fileId 的页数上限：6→10 页（每页 50 首，覆盖 500 首）。
+  // 从歌单移除功能会经此定位任意歌单中的歌曲，300 首上限会让大歌单
+  // 尾部歌曲无法移除（返回 KUGOU_SONG_NOT_IN_LIST）。
+  for (let page = 1; page <= 10; page += 1) {
     const chunk = await handleKugouPlaylistTracks(listId, cookie, { limit: 50, offset: (page - 1) * 50, paged: true });
     const tracks = chunk.tracks || [];
     for (let i = 0; i < tracks.length; i += 1) {
@@ -2087,13 +2284,31 @@ async function findKugouFavoriteFileId(song, cookie, listId) {
       const trackHash = String(track.hash || track.fileHash || '').toLowerCase();
       if (trackHash !== hash) continue;
       if (track.fileId) {
-        kugouLikeFileIdByHash.set(hash, String(track.fileId));
-        return String(track.fileId);
+        return {
+          fileId: String(track.fileId),
+          listVersion: chunk.listVersion || kugouListVersionById.get(listKey) || 0,
+        };
       }
     }
     if (!tracks.length || tracks.length < 50) break;
   }
-  return '';
+  return { fileId: '', listVersion: 0 };
+}
+
+function classifyKugouPlaylistMutationFailure(error) {
+  const providerErrorCode = kugouGatewayProviderErrorCode(error);
+  if (providerErrorCode === 30203) {
+    return {
+      providerErrorCode,
+      error: 'KUGOU_PLAYLIST_REMOVE_UNSUPPORTED',
+      message: '酷狗不允许从该歌单移除歌曲，请确认这是自己创建的歌单',
+    };
+  }
+  return {
+    providerErrorCode,
+    error: String(error && error.message || 'KUGOU_PLAYLIST_REMOVE_FAILED'),
+    message: '',
+  };
 }
 
 async function handleKugouRemoveSongFromList(listId, song, cookie) {
@@ -2101,16 +2316,22 @@ async function handleKugouRemoveSongFromList(listId, song, cookie) {
   if (!auth.playbackReady) return { provider: 'kugou', success: false, error: 'KUGOU_AUTH_REQUIRED' };
   const targetListId = String(listId || '').trim() || await resolveKugouFavoriteListId(cookie);
   if (!targetListId) return { provider: 'kugou', success: false, error: 'KUGOU_FAVORITE_LIST_NOT_FOUND' };
-  const fileId = await findKugouFavoriteFileId(song, cookie, targetListId);
-  if (!fileId) return { provider: 'kugou', success: false, error: 'KUGOU_SONG_NOT_IN_LIST' };
-  const body = {
-    listid: Number(targetListId) || targetListId,
-    userid: Number(auth.userid),
+  const located = await findKugouFavoriteFileId(song, cookie, targetListId);
+  if (!located || !located.fileId) return { provider: 'kugou', success: false, error: 'KUGOU_SONG_NOT_IN_LIST' };
+  const body = buildKugouDeleteSongBody({
+    listId: targetListId,
+    userId: auth.userid,
     token: auth.token,
-    type: 0,
-    list_ver: 0,
-    data: [{ fileid: Number(fileId) || fileId }],
-  };
+    fileId: located.fileId,
+    listVersion: located.listVersion,
+  });
+  console.log('[KugouPlaylistRemoveSong] request', {
+    hasListId: !!targetListId,
+    listIdLength: String(body.listid || '').length,
+    hasListVersion: !!body.list_ver,
+    hasFileId: !!located.fileId,
+    fileIdLength: String(located.fileId).length,
+  });
   const json = await kugouH5GatewayRequest('/v4/delete_songs', {
     method: 'POST',
     cookie,
@@ -2129,6 +2350,37 @@ async function handleKugouLikeToggle(song, like, cookie) {
 
 async function handleKugouPlaylistAddSong(listId, song, cookie) {
   return handleKugouAddSongToList(listId, song, cookie);
+}
+
+// 从指定歌单移除歌曲：复用与"取消喜欢"相同的删歌流程（按 fileId 定位删除）。
+async function handleKugouPlaylistRemoveSong(listId, song, cookie) {
+  let result;
+  try {
+    result = await handleKugouRemoveSongFromList(listId, song, cookie);
+  } catch (error) {
+    const failure = classifyKugouPlaylistMutationFailure(error);
+    console.warn('[KugouPlaylistRemoveSong] rejected', {
+      hasListId: !!String(listId || ''),
+      providerErrorCode: failure.providerErrorCode,
+      error: failure.error,
+    });
+    return {
+      provider: 'kugou',
+      success: false,
+      listId: String(listId || ''),
+      error: failure.error,
+      message: failure.message,
+      providerErrorCode: failure.providerErrorCode,
+    };
+  }
+  return {
+    provider: 'kugou',
+    success: !!(result && result.success),
+    listId: result && result.listId || String(listId || ''),
+    body: result && result.body,
+    error: result && result.error || '',
+    message: '',
+  };
 }
 
 function kugouSignParamsKey(clienttime) {
@@ -2453,11 +2705,13 @@ module.exports = {
   handleKugouGuessLike,
   handleKugouTop,
   handleKugouRecommendPlaylists,
+  validateKugouPlaylistSession,
   handleKugouUserPlaylists,
   handleKugouPlaylistTracks,
   handleKugouLikeCheck,
   handleKugouLikeToggle,
   handleKugouPlaylistAddSong,
+  handleKugouPlaylistRemoveSong,
   getKugouLoginInfo,
   normalizeKugouCookieInput,
   clearKugouSessionCaches,
@@ -2483,5 +2737,12 @@ module.exports = {
     stabilizeKugouVipProbe,
     clearKugouSessionCaches,
     extractKugouAuth,
+    extractKugouGatewayPlaylistLists,
+    extractKugouListVersion,
+    buildKugouDeleteSongBody,
+    kugouGatewayProviderErrorCode,
+    classifyKugouPlaylistSessionFailure,
+    classifyKugouPlaylistMutationFailure,
+    pickKugouLyricCandidateByDuration,
   },
 };

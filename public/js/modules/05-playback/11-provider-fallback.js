@@ -504,11 +504,18 @@ async function searchAlternatePlatformSong(song, requestedTarget, recovery) {
   );
   if (data === sourceFallbackBudgetTimeoutResult || (recovery && !sourceFallbackRecoveryCanContinue(recovery))) return null;
   var list = data && (data.songs || data.result || []);
+  // 同名同歌手可能匹配到 Live/重制/改编版（时长不同、歌词对不上），优先选与所播音频时长最接近的候选
+  var refSec = typeof playbackDurationFromSong === 'function' ? playbackDurationFromSong(song) : 0;
+  var bestCandidate = null;
+  var bestDelta = Infinity;
   for (var i = 0; i < list.length; i++) {
     if (typeof sourceCandidateRejectReason === 'function' && sourceCandidateRejectReason(song, list[i], target)) continue;
-    if (isSameTitleArtist(song, list[i])) return cloneSong(list[i]);
+    if (!isSameTitleArtist(song, list[i])) continue;
+    var candSec = typeof playbackDurationFromSong === 'function' ? playbackDurationFromSong(list[i]) : 0;
+    var delta = (refSec > 0 && candSec > 0) ? Math.abs(refSec - candSec) : Infinity;
+    if (!bestCandidate || delta < bestDelta) { bestCandidate = list[i]; bestDelta = delta; }
   }
-  return null;
+  return bestCandidate ? cloneSong(bestCandidate) : null;
 }
 function sourceFallbackSongKey(song) {
   if (!song) return '';

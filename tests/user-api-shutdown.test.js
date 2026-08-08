@@ -39,3 +39,74 @@ test('desktop shutdown awaits UserApi disposal', () => {
   assert.match(main, /userApiRuntime\.dispose\(\)/);
   assert.match(main, /await userApiRuntime\.dispose\(\)/);
 });
+
+test('UserApi diagnostics use Electron\'s object console-message event shape', () => {
+  const runtime = fs.readFileSync(runtimePath, 'utf8');
+  assert.match(runtime, /const consoleListener = \(_event, details\) =>/);
+});
+
+test('restored UserApi sources can request during script initialization', async () => {
+  const ipcMain = createIpcMain();
+  let initializationError = null;
+  let requestObserved = false;
+  let activeSourceRead = false;
+  let windowCreated = false;
+  let loadUrlCalled = false;
+  let executeCalled = false;
+  let windowDestroyed = false;
+  const webContents = {
+    on() {},
+    removeListener() {},
+    send() {},
+    isDestroyed() { return windowDestroyed; },
+    async executeJavaScript() {
+      executeCalled = true;
+      const initedListener = ipcMain.listeners.get('mineradio-lx-user-api-event');
+      initedListener?.({ sender: webContents }, { event: 'inited', payload: { sources: [] } });
+      const requestHandler = ipcMain.handlers.get('mineradio-lx-user-api-request');
+      try {
+        const request = requestHandler({}, {
+          url: 'not-a-url',
+          options: { timeout: 1 },
+          requestId: 'init-request'
+        });
+        requestObserved = true;
+        request?.catch(() => {});
+      } catch (error) {
+        initializationError = error;
+      }
+    }
+  };
+  const BrowserWindow = function FakeBrowserWindow() {
+    windowCreated = true;
+    return {
+      webContents,
+      async loadURL() { loadUrlCalled = true; },
+      isDestroyed() { return windowDestroyed; },
+      destroy() { windowDestroyed = true; }
+    };
+  };
+  const runtime = registerUserApiIpc({
+    ipcMain,
+    BrowserWindow,
+    app: {
+      getPath() { return path.dirname(runtimePath); },
+      whenReady() { return Promise.resolve(); },
+    },
+    store: {
+      getActiveSource() {
+        activeSourceRead = true;
+        return { sourceId: 'restored-source', sourceText: 'void 0;', metadata: {} };
+      }
+    },
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(activeSourceRead, true);
+  assert.equal(windowCreated, true);
+  assert.equal(loadUrlCalled, true);
+  assert.equal(executeCalled, true);
+  assert.equal(initializationError, null);
+  assert.equal(requestObserved, true);
+  await runtime.dispose();
+});

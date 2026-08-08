@@ -1329,6 +1329,7 @@ function applyDesktopWallpaperRuntimeStatus(payload) {
   updateDesktopWallpaperRuntimeControls(desktopWallpaperRuntimeState);
   scheduleDesktopIconShieldReport(!(nextEnabled && status.interactive === true));
   scheduleDesktopPointerRouteReport(null, true);
+  scheduleDesktopOverlayHealthCheck();
   return desktopWallpaperRuntimeState;
 }
 function desktopWallpaperErrorLabel(error) {
@@ -1392,6 +1393,7 @@ function applyDesktopLyricsState(force) {
     desktopOverlayPushState.lastLyricsCustomFontId = '';
   }
   pushDesktopLyricsState(!!force);
+  scheduleDesktopOverlayHealthCheck();
 }
 function pushWallpaperState(force) {
   var api = getDesktopWindowApi();
@@ -1426,11 +1428,13 @@ function applyWallpaperModeState(force) {
     else {
       fx.wallpaperMode = result.ok === true && result.enabled === true;
       updateFxInputs();
+      scheduleDesktopOverlayHealthCheck();
     }
     if (result.ok !== true) {
       var failedStatus = result.status && typeof result.status === 'object' ? result.status : {};
       fx.wallpaperMode = result.enabled === true || failedStatus.enabled === true || failedStatus.active === true;
       updateFxInputs();
+      scheduleDesktopOverlayHealthCheck();
     }
     return result;
   }).catch(function (error) {
@@ -1439,16 +1443,40 @@ function applyWallpaperModeState(force) {
     desktopWallpaperRuntimeState = Object.assign({}, desktopWallpaperRuntimeState, { active: false, enabled: false, attaching: false, lastError: String(error && error.message || error) });
     updateFxInputs();
     updateDesktopWallpaperRuntimeControls(desktopWallpaperRuntimeState);
+    scheduleDesktopOverlayHealthCheck();
     return { ok: false, enabled: false, error: desktopWallpaperRuntimeState.lastError };
   });
 }
 function syncDesktopOverlayState() {
   if (fx.desktopLyrics) pushDesktopLyricsState(false);
 }
-setInterval(function () {
-  if (fx && fx.desktopLyrics) syncDesktopOverlayState();
-  if (fx && fx.wallpaperMode) ensureDesktopWallpaperFunctionalUi('health-watch');
-}, 320);
+var desktopOverlayHealthCheckTimer = 0;
+function clearDesktopOverlayHealthCheck() {
+  if (desktopOverlayHealthCheckTimer) clearTimeout(desktopOverlayHealthCheckTimer);
+  desktopOverlayHealthCheckTimer = 0;
+}
+function desktopOverlayHealthCheckEnabled() {
+  return !!(fx && (fx.desktopLyrics || fx.wallpaperMode));
+}
+function scheduleDesktopOverlayHealthCheck() {
+  if (!desktopOverlayHealthCheckEnabled() || document.hidden) {
+    clearDesktopOverlayHealthCheck();
+    return;
+  }
+  if (desktopOverlayHealthCheckTimer) return;
+  desktopOverlayHealthCheckTimer = setTimeout(function () {
+    desktopOverlayHealthCheckTimer = 0;
+    if (!desktopOverlayHealthCheckEnabled() || document.hidden) {
+      clearDesktopOverlayHealthCheck();
+      return;
+    }
+    if (fx.desktopLyrics) syncDesktopOverlayState();
+    if (fx.wallpaperMode) ensureDesktopWallpaperFunctionalUi('health-watch');
+    scheduleDesktopOverlayHealthCheck();
+  }, 320);
+}
+document.addEventListener('visibilitychange', scheduleDesktopOverlayHealthCheck);
+window.addEventListener('pagehide', clearDesktopOverlayHealthCheck, { once: true });
 
 // 全屏
 var desktopFullscreenActive = false;
@@ -1606,7 +1634,9 @@ function toggleFullscreen() {
       if (fx.desktopLyrics === enabled) return;
       fx.desktopLyrics = enabled;
       updateFxInputs();
+      scheduleDesktopOverlayHealthCheck();
       saveLyricLayout({ user: true, reason: 'desktopLyrics' });
+      if (typeof updateLyricsToggleBtnState === 'function') updateLyricsToggleBtnState();
       showToast(enabled ? '桌面歌词已开启' : '桌面歌词已关闭');
     });
   }

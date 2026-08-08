@@ -130,6 +130,25 @@ function updateMergedPlaylistCatalogCount(snapshot) {
     try { renderUserPlaylistsList({ animate: false, preserveScroll: true }); } catch (e) { }
   }
 }
+function refreshMergedPlaylistCatalogFromSnapshot(snapshot, reason) {
+  if (!snapshot || !(fx && fx.shelfMergeCollections) || !Array.isArray(userPlaylists)) return false;
+  var total = Math.max(0, Number(snapshot.total) || (snapshot.tracks || []).length || 0);
+  var changed = false;
+  userPlaylists = userPlaylists.map(function (playlist) {
+    if (!playlist || playlist.provider !== MERGED_PLAYLIST_PROVIDER || String(playlist.id || '') !== String(MERGED_PLAYLIST_ID)) return playlist;
+    var next = buildMergedPlaylistRecord(playlist.sources || []);
+    next.trackCount = total;
+    if (Number(playlist.trackCount) !== total) changed = true;
+    return next;
+  });
+  if (!changed) return false;
+  playlistCatalogRevision += 1;
+  if (typeof renderUserPlaylistsList === 'function') {
+    try { renderUserPlaylistsList({ animate: false, preserveScroll: true }); } catch (e) { }
+  }
+  if (typeof scheduleShelfRebuild === 'function') scheduleShelfRebuild(reason || 'merged-playlist-cache-refresh', true);
+  return true;
+}
 function mergedPlaylistSourcePage(source, offset, limit, signal) {
   var requestOptions = signal ? { signal: signal } : { timeoutMs: 16000 };
   return apiJson(playlistTracksEndpoint(source.provider, source.id, { offset: offset, limit: limit }), requestOptions);
@@ -237,11 +256,20 @@ async function prepareMergedPlaylistCache(record, options) {
   return op;
 }
 var mergedPlaylistSyncDelayTimer = 0;
-function scheduleMergedPlaylistCacheSync(reason, delayMs) {
+function scheduleMergedPlaylistCacheSync(reason, delayMs, forceBuild) {
   if (!(fx && fx.shelfMergeCollections)) return Promise.resolve(null);
   var record = mergedPlaylistRecordForId(MERGED_PLAYLIST_ID);
   if (!record || !record.sources || !record.sources.length) return Promise.resolve(null);
-  if (mergedPlaylistCacheRuntime.promise) return mergedPlaylistCacheRuntime.promise;
+  if (mergedPlaylistCacheRuntime.promise) {
+    // 写操作脏标记（forceBuild）遇进行中的后台同步：等其完成后强制再重建一次，
+    // 避免 in-flight 结果（写操作前的数据）重新持久化，覆盖合并歌单的新状态。
+    if (forceBuild) {
+      return mergedPlaylistCacheRuntime.promise.then(function () {
+        return scheduleMergedPlaylistCacheSync(reason, 0, true);
+      });
+    }
+    return mergedPlaylistCacheRuntime.promise;
+  }
   // 用户的 prepare 正在进行（首次打开合并歌单全量同步中）：复用其结果，
   // 避免后台同步再并发触发一次全量拉取。
   if (mergedPlaylistCacheRuntime.preparePromise) return mergedPlaylistCacheRuntime.preparePromise;
@@ -249,7 +277,10 @@ function scheduleMergedPlaylistCacheSync(reason, delayMs) {
   // 无缓存（首次使用）时不自动全量拉取所有源歌单曲目，等用户真正打开
   // 合并歌单时再同步——避免应用启动时叠加全量网络拉取导致"歌单加载"
   // 长时间无反馈，也避免后台同步与应用关闭交错导致缓存未保存完。
-  if (!mergedPlaylistCacheRuntime.snapshot) return Promise.resolve(null);
+  // forceBuild（收藏/喜欢/移除等写操作触发的脏标记）时即使缓存刚被
+  // invalidate（snapshot 置空）也必须重建，否则缓存删除后无人重建：
+  // 目录 trackCount 停留在旧值、依赖缓存路径读不到最新歌曲。
+  if (!mergedPlaylistCacheRuntime.snapshot && !forceBuild) return Promise.resolve(null);
   // delayMs > 0 时延迟执行：合并窗口内重复调度只保留最后一次，
   // 避免用户连续打开/切换歌单时叠加多次后台同步。
   if (delayMs > 0) {
@@ -257,7 +288,7 @@ function scheduleMergedPlaylistCacheSync(reason, delayMs) {
     return new Promise(function (resolve) {
       mergedPlaylistSyncDelayTimer = setTimeout(function () {
         mergedPlaylistSyncDelayTimer = 0;
-        resolve(scheduleMergedPlaylistCacheSync(reason, 0));
+        resolve(scheduleMergedPlaylistCacheSync(reason, 0, forceBuild));
       }, delayMs);
     });
   }
@@ -280,7 +311,13 @@ async function markMergedPlaylistDirty(reason) {
   } catch (e) {
     console.warn('[MergedPlaylistCache] invalidate failed:', e);
   }
-  return scheduleMergedPlaylistCacheSync(reason || 'like-toggle');
+  // forceBuild：缓存刚被 invalidate（snapshot 置空），必须重建缓存，
+  // 否则 scheduleMergedPlaylistCacheSync 会因无缓存跳过后台重同步，
+  // 导致合并歌单目录数量与内容停留在旧值。
+  reason = reason || 'like-toggle';
+  var result = await scheduleMergedPlaylistCacheSync(reason, 0, true);
+  refreshMergedPlaylistCatalogFromSnapshot(result && result.snapshot, reason);
+  return result;
 }
 function createMergedPlaylistPagerForRecord(record, signal) {
   record = record || {};

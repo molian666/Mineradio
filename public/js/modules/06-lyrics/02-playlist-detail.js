@@ -180,6 +180,315 @@ function playlistPanelNoticeHtml(text, isError) {
   if (!text) text = '歌单暂无可播放歌曲';
   return '<div style="text-align:center;padding:14px 10px;color:' + (isError ? 'rgba(255,180,160,.82)' : 'rgba(255,255,255,.30)') + ';font-size:11.5px;line-height:1.55">' + escHtml(text) + '</div>';
 }
+// 当前歌单详情是否为"我的喜欢/喜欢的音乐"歌单（网易云 specialType=5 或标题匹配）
+function isDetailPlaylistLikedContext() {
+  var st = playlistPanelDetailState;
+  var pl = st && st.playlist;
+  if (!pl) return false;
+  if (Number(pl.specialType || 0) === 5) return true;
+  var parts = String(st.key || '').split(':');
+  var provider = normalizePlaylistProvider(parts[0]);
+  var pid = parts.slice(1).join(':');
+  return isLikedPlaylistContext(pid, pl.name, pl);
+}
+// 歌单详情行右侧操作按钮：红心（我的喜欢歌单中即"移除喜欢"）+ 从歌单移除
+function detailPlaylistRowActionsHtml(song, index) {
+  var st = playlistPanelDetailState;
+  if (!song || !st || !st.key) return '';
+  var parts = st.key.split(':');
+  var detailProvider = normalizePlaylistProvider(parts[0]);
+  var isMerged = detailProvider === MERGED_PLAYLIST_PROVIDER;
+  // merged 详情按歌曲来源平台取 adapter（红心/移除作用于来源平台歌单）
+  var provider = isMerged ? songAccountProvider(song) : detailProvider;
+  var adapter = songAccountAdapter(provider);
+  if (!adapter) return '';
+  var html = '';
+  if (adapter.like && adapter.likeUrl) {
+    var liked = isSongLiked(song);
+    var likedContext = isDetailPlaylistLikedContext();
+    html += '<button class="pl-detail-act' + (liked ? ' liked' : '') + '" type="button" title="' + (likedContext && liked ? '移除喜欢' : (liked ? '取消红心' : '红心喜欢')) + '" onclick="event.stopPropagation();toggleLikeDetailPlaylistTrack(' + index + ')">' + heartIconSvg() + '</button>';
+  }
+  var canRemove = false;
+  if (isMerged) {
+    // 合并歌单：本地收藏歌曲（merged:local-collect）走本地移除；其余需
+    // 能定位来源歌单且来源平台支持移除
+    var mergedSrc = resolveMergedTrackSource(song);
+    canRemove = !!mergedSrc && (mergedSrc.provider === MERGED_PLAYLIST_PROVIDER ? mergedSrc.id === MERGED_LOCAL_COLLECT_SOURCE_ID : !!adapter.playlistRemoveUrl);
+  } else {
+    canRemove = !!adapter.playlistRemoveUrl;
+  }
+  if (canRemove) {
+    html += '<button class="pl-detail-act pl-detail-remove" type="button" title="从歌单移除" onclick="event.stopPropagation();removeDetailPlaylistTrack(' + index + ')">×</button>';
+  }
+  return html;
+}
+// 定位 merged 歌曲的来源平台歌单（provider + 歌单 id）
+function resolveMergedTrackSource(song) {
+  if (!song) return null;
+  if (song.sourcePlaylistId) {
+    // 以组装时记录的来源平台为准（与 song.provider 可能不一致）
+    var provider = song.sourcePlaylistProvider || song.provider || songAccountProvider(song);
+    return { provider: provider, id: String(song.sourcePlaylistId) };
+  }
+  // 兜底：旧缓存快照中的歌曲可能没有来源字段，从 sources.tracks 反查
+  var snapshot = typeof mergedPlaylistCacheRuntime !== 'undefined' && mergedPlaylistCacheRuntime && mergedPlaylistCacheRuntime.snapshot;
+  var sources = snapshot && Array.isArray(snapshot.sources) ? snapshot.sources : [];
+  for (var i = 0; i < sources.length; i++) {
+    var source = sources[i] || {};
+    if (String(source.provider || '') !== songAccountProvider(song)) continue;
+    var hit = (source.tracks || []).some(function (track) {
+      return !!track && queuePanelItemKey(track) === queuePanelItemKey(song);
+    });
+    if (hit) return { provider: String(source.provider || ''), id: String(source.id || '') };
+  }
+  return null;
+}
+async function toggleLikeDetailPlaylistTrack(index) {
+  var st = playlistPanelDetailState;
+  var song = st.tracks && st.tracks[index];
+  if (!song) return;
+  var wasLiked = isSongLiked(song);
+  // 喜欢类上下文（"我的喜欢"歌单，或 merged 中来自喜欢类来源歌单的歌曲）
+  // 在歌单详情中未同步 likedSongMap：预置为已喜欢，避免 toggle 反向变成重新喜欢
+  if (!wasLiked && detailTrackInLikedContext(song)) {
+    var key = songAccountStateKey(song);
+    if (key) { likedSongMap[key] = true; wasLiked = true; }
+  }
+  await toggleLikeSong(song);
+  // 在"我的喜欢"歌单中取消红心 = 从该歌单移除，立即从详情列表消失
+  if (isDetailPlaylistLikedContext() && wasLiked && !isSongLiked(song)) {
+    removeTrackFromDetailList(index);
+  }
+}
+// 歌曲是否处于"喜欢类"上下文（红心必为已喜欢，避免 toggle 反向）
+function detailTrackInLikedContext(song) {
+  var st = playlistPanelDetailState;
+  if (!st || !song || !st.key) return false;
+  var parts = String(st.key || '').split(':');
+  var detailProvider = normalizePlaylistProvider(parts[0]);
+  if (detailProvider !== MERGED_PLAYLIST_PROVIDER) return isDetailPlaylistLikedContext();
+  var src = resolveMergedTrackSource(song);
+  if (!src) return false;
+  if (src.provider === 'spotify') return src.id === 'spotify-liked' || src.id === 'liked';
+  var sourcePl = (userPlaylists || []).find(function (pl) {
+    return normalizePlaylistProvider(pl && pl.provider) === src.provider && String(pl && pl.id || '') === src.id;
+  });
+  if (sourcePl) return Number(sourcePl.specialType || 0) === 5 || isLikedPlaylistContext(src.id, sourcePl.name, sourcePl);
+  return /我喜欢|喜欢的音乐|liked/i.test(String(src.id || ''));
+}
+function removeTrackFromDetailList(index) {
+  var st = playlistPanelDetailState;
+  if (!st || !st.tracks || !st.tracks[index]) return false;
+  st.tracks.splice(index, 1);
+  st.total = Math.max(st.tracks.length, Math.max(0, (Number(st.total) || 0) - 1));
+  if (st.playlist && typeof st.playlist.trackCount === 'number') {
+    st.playlist.trackCount = Math.max(0, st.playlist.trackCount - 1);
+  }
+  renderPlaylistPanelDetailRows();
+  return true;
+}
+// 歌曲移出来源歌单后，如果仍处于喜欢状态，继续调用统一取消喜欢流程。
+// 返回 false 只表示红心取消失败，不影响来源歌单已经完成的移除。
+async function unlikeSongAfterPlaylistRemove(song) {
+  if (typeof isSongLiked !== 'function' || !isSongLiked(song)) return true;
+  if (typeof toggleLikeSong !== 'function') {
+    showToast('歌曲已移出歌单，但取消红心功能不可用');
+    return false;
+  }
+  try { await toggleLikeSong(song); } catch (_) { }
+  if (typeof isSongLiked === 'function' && isSongLiked(song)) {
+    showToast('歌曲已移出歌单，但取消红心失败');
+    return false;
+  }
+  return true;
+}
+// 从来源平台歌单移除歌曲（核心逻辑，可复用：歌单详情面板与 3D 歌单架内容框共用）
+// source: { provider, id, merged, liked }；返回 true = 移除成功
+async function removeSongFromSourcePlaylist(song, source) {
+  if (!song || !source || !source.provider || !source.id) {
+    showToast('无法定位该歌曲的来源歌单，暂不能移除');
+    return false;
+  }
+  var provider = source.provider;
+  var pid = String(source.id);
+  // 合并歌单本地收藏（平台写不可用时加入的歌曲）没有平台歌单实体，
+  // "从歌单移除" = 从本地收藏删除。
+  if (provider === MERGED_PLAYLIST_PROVIDER && pid === MERGED_LOCAL_COLLECT_SOURCE_ID) {
+    if (typeof mergedRemoveLocalCollectSong === 'function') mergedRemoveLocalCollectSong(song);
+    var localKey = songAccountStateKey(song);
+    if (localKey) likedSongMap[localKey] = false;
+    updateLikeButtons(song);
+    safeRenderQueuePanel('detail-remove-like', { scrollCurrent: miniQueueOpen });
+    refreshSearchResultActionStates();
+    if (typeof markMergedPlaylistDirty === 'function') markMergedPlaylistDirty('local-collect-remove').catch(function () { });
+    showToast('已从合并歌单移除（本地收藏）');
+    return true;
+  }
+  // 合并歌单中的 QQ 来源歌曲只维护本地排除记录，不调用 QQ 平台写接口。
+  if (source.merged && provider === 'qq') {
+    if (source.liked) {
+      var qqLikeKey = songAccountStateKey(song);
+      if (qqLikeKey) likedSongMap[qqLikeKey] = true;
+    }
+    if (typeof mergedAddLocalRemoval !== 'function' || !mergedAddLocalRemoval(song, source)) {
+      showToast('QQ 合并歌单本地更新失败');
+      return false;
+    }
+    var qqUnlikeOk = await unlikeSongAfterPlaylistRemove(song);
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty('qq-merged-local-remove').catch(function () { });
+    }
+    showToast(qqUnlikeOk ? '已从合并歌单移除（QQ 仅更新本地）' : '已从合并歌单移除，但取消红心失败');
+    return true;
+  }
+  var adapter = songAccountAdapter(provider);
+  if (!adapter || !adapter.playlistRemoveUrl) {
+    showToast(playlistProviderName(provider) + '暂不支持从歌单移除歌曲');
+    return false;
+  }
+  if (!ensureLoggedInForAction(provider)) return false;
+  // Spotify 喜欢伪歌单（spotify-liked）没有真实歌单实体，"从歌单移除"= 取消红心。
+  // 歌曲出现在 liked 源中即证明已被喜欢：预置 likedSongMap 后走 toggleLikeSong
+  // 的 unlike 分支（勿直接 toggle——merged 视图未同步 likedSongMap 时会反向重新喜欢）。
+  if (provider === 'spotify' && (pid === 'spotify-liked' || pid === 'liked')) {
+    var spotifyKey = songAccountStateKey(song);
+    if (!spotifyKey) { showToast('缺少 Spotify 歌曲标识'); return false; }
+    likedSongMap[spotifyKey] = true;
+    await toggleLikeSong(song);
+    if (!isSongLiked(song)) {
+      showToast('已从 Spotify 喜欢移除');
+      // toggleLikeSong 内部已失效合并歌单缓存并重同步，无需重复处理
+      return true;
+    }
+    return false;
+  }
+  try {
+    var r = await apiJson(adapter.playlistRemoveUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pid: pid, song: song, id: songAccountId(song, provider) })
+    });
+    if (r && (r.error || r.success === false)) throw new Error(r.error || r.message || 'PLAYLIST_REMOVE_FAILED');
+    // 喜欢类来源的歌曲在载入详情时可能尚未写入 likedSongMap，先恢复为已喜欢，
+    // 再由统一取消喜欢流程调用对应平台接口；普通歌单中已红心歌曲同样会走这里。
+    if (source.liked) {
+      var key = songAccountStateKey(song);
+      if (key) likedSongMap[key] = true;
+    }
+    if (source.likedPlaylist) {
+      var key = songAccountStateKey(song);
+      if (key) likedSongMap[key] = false;
+      unlikeOk = true;
+    } else {
+      var unlikeOk = await unlikeSongAfterPlaylistRemove(song);
+    }
+    showToast(unlikeOk
+      ? (source.merged ? '已从来源歌单移除' : '已从歌单移除')
+      : (source.merged ? '已从来源歌单移除，但取消红心失败' : '已从歌单移除，但取消红心失败'));
+    updateLikeButtons(song);
+    safeRenderQueuePanel('detail-remove-like', { scrollCurrent: miniQueueOpen });
+    refreshSearchResultActionStates();
+    // 移除改变源歌单内容：失效合并歌单缓存并后台重同步（"同时移除合并歌单"）
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty('playlist-remove-song').catch(function () { });
+    }
+    return true;
+  } catch (err) {
+    var errorText = String(err && err.message || '');
+    if (/KUGOU_PLAYLIST_REMOVE_UNSUPPORTED/i.test(errorText)) {
+      showToast('酷狗不允许从该歌单移除歌曲，请确认这是自己创建的歌单');
+      return false;
+    }
+    if (/SCOPE|PERMISSION/i.test(errorText)) showToast('当前授权缺少歌单写入权限，请重新授权');
+    else if (/LOGIN_REQUIRED|AUTH_REQUIRED/i.test(errorText)) showToast(adapter.label + '登录状态已失效，请重新登录');
+    else if (/NOT_IN_LIST|KUGOU_SONG_NOT_IN_LIST/i.test(errorText)) showToast('歌曲不在该歌单中，或位于歌单较后位置暂无法定位');
+    else showToast(errorText ? ('从歌单移除失败: ' + errorText) : '从歌单移除失败');
+    return false;
+  }
+}
+async function removeDetailPlaylistTrack(index) {
+  var st = playlistPanelDetailState;
+  var song = st.tracks && st.tracks[index];
+  if (!song || !st.key) return;
+  var parts = st.key.split(':');
+  var detailProvider = normalizePlaylistProvider(parts[0]);
+  var isMerged = detailProvider === MERGED_PLAYLIST_PROVIDER;
+  var source;
+  if (isMerged) {
+    // 合并歌单：定位歌曲的来源平台歌单，移除同步到该平台歌单
+    var resolved = resolveMergedTrackSource(song);
+    if (!resolved || !resolved.id) {
+      showToast('无法定位该歌曲的来源歌单，暂不能移除');
+      return;
+    }
+    source = { provider: resolved.provider, id: resolved.id, merged: true, liked: detailTrackInLikedContext(song), likedPlaylist: detailTrackInLikedContext(song) };
+  } else {
+    source = { provider: detailProvider, id: parts.slice(1).join(':'), merged: false, liked: isDetailPlaylistLikedContext(), likedPlaylist: isDetailPlaylistLikedContext() };
+  }
+  var ok = await removeSongFromSourcePlaylist(song, source);
+  if (ok) removeTrackFromDetailList(index);
+}
+// 删除歌单成功后同步移除本地目录中的歌单记录（含各平台原始数组）
+function removePlaylistFromLocalCatalog(provider, id) {
+  var rows = playlistCatalogProviderArray(provider);
+  var next = (rows || []).filter(function (pl) { return String(pl && pl.id || '') !== String(id); });
+  if (next.length !== (rows || []).length) setPlaylistCatalogProviderArray(provider, next);
+  userPlaylists = (userPlaylists || []).filter(function (pl) {
+    return !(normalizePlaylistProvider(pl && pl.provider) === provider && String(pl && pl.id || '') === String(id));
+  });
+  playlistCatalogRevision += 1;
+}
+// 删除歌单（核心逻辑，可复用：歌单详情面板与 3D 歌单架卡片共用）
+async function deletePlaylistByKey(provider, id, name) {
+  provider = normalizePlaylistProvider(provider);
+  var adapter = songAccountAdapter(provider);
+  if (!adapter || !adapter.playlistDeleteUrl) {
+    showToast(playlistProviderName(provider) + '暂不支持删除歌单');
+    return false;
+  }
+  if (!ensureLoggedInForAction(provider)) return false;
+  if (!window.confirm('确定删除歌单「' + (name || '未命名歌单') + '」吗？删除后不可恢复。')) return false;
+  try {
+    var r = await apiJson(adapter.playlistDeleteUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id, pid: id })
+    });
+    if (r && (r.error || r.success === false)) throw new Error(r.error || r.message || 'PLAYLIST_DELETE_FAILED');
+    showToast('歌单已删除');
+    removePlaylistFromLocalCatalog(provider, id);
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty('playlist-delete').catch(function () { });
+    }
+    if (typeof refreshUserPlaylists === 'function') refreshUserPlaylists(true).catch(function () { });
+    if (typeof scheduleShelfRebuild === 'function') scheduleShelfRebuild('playlist-delete', true);
+    return true;
+  } catch (err) {
+    var errorText = String(err && err.message || '');
+    if (/SCOPE|PERMISSION/i.test(errorText)) showToast('当前授权缺少歌单管理权限，请重新授权');
+    else if (/LOGIN_REQUIRED|AUTH_REQUIRED/i.test(errorText)) showToast(adapter.label + '登录状态已失效，请重新登录');
+    else showToast(errorText ? ('删除歌单失败: ' + errorText) : '删除歌单失败');
+    return false;
+  }
+}
+async function deleteDetailPlaylist() {
+  var st = playlistPanelDetailState;
+  if (!st || !st.key || !st.playlist) return;
+  var parts = st.key.split(':');
+  var provider = normalizePlaylistProvider(parts[0]);
+  var id = parts.slice(1).join(':');
+  var ok = await deletePlaylistByKey(provider, id, st.playlist.name);
+  if (ok) {
+    // 关闭详情并重渲染（目录已由 deletePlaylistByKey 移除并刷新）
+    cancelPlaylistPanelDetailRequest();
+    playlistPanelDetailState.key = '';
+    playlistPanelDetailState.tracks = [];
+    playlistPanelDetailState.playlist = null;
+    playlistPanelDetailState.total = 0;
+    playlistPanelDetailState.hasMore = false;
+    renderPlaylistPanelDetailState();
+  }
+}
 function playlistPanelDetailRowsHtml(options) {
   options = options || {};
   var st = playlistPanelDetailState;
@@ -204,6 +513,7 @@ function playlistPanelDetailRowsHtml(options) {
       imgTag +
       '<div style="flex:1;min-width:0"><div class="pl-detail-row-title">' + escHtml(song.name || '') + '</div>' +
       '<button type="button" class="pl-detail-row-artist" data-pl-detail-artist="' + i + '">' + escHtml(song.artist || '未知歌手') + '</button></div>' +
+      detailPlaylistRowActionsHtml(song, i) +
       '</div>';
   }).join('');
   rows += '<div class="pl-detail-virtual-spacer" aria-hidden="true" style="height:' + (Math.max(0, tracks.length - end) * PLAYLIST_DETAIL_ROW_STEP) + 'px"></div>';
@@ -316,10 +626,15 @@ function playlistPanelDetailHtml(pl, provider, detailWindow) {
   var collectionButton = canUncollect
     ? '<button class="fx-mini-btn ghost pl-detail-top-btn" type="button" data-pl-detail-collection="0">取消收藏</button>'
     : '';
+  // 删除歌单：仅自有、非"我的喜欢"、非合并歌单；无平台接口时点击后给出提示
+  var canDelete = !!(pl && !pl.virtual && !pl.subscribed && !isDetailPlaylistLikedContext() && provider !== MERGED_PLAYLIST_PROVIDER);
+  var deleteButton = canDelete
+    ? '<button class="fx-mini-btn ghost pl-detail-top-btn pl-detail-delete-btn" type="button" data-pl-detail-delete="1">删除歌单</button>'
+    : '';
   return '<div class="pl-inline-detail" data-pl-detail="' + escHtml(key) + '" style="height:' + playlistPanelDetailShellHeight() + 'px">' +
     '<div class="pl-detail-sticky">' +
     '<div class="pl-detail-head">' + img + '<div style="flex:1;min-width:0"><div class="pl-detail-title">' + escHtml(pl.name || '歌单详情') + '</div><div class="pl-detail-sub">' + escHtml((expectedTotal || tracks.length || 0) + ' 首 · ' + (pl.creator || playlistProviderName(provider))) + '</div></div><div class="pl-detail-count">' + (loading && !tracks.length ? '载入中' : (tracks.length + (expectedTotal > tracks.length ? '/' + expectedTotal : ''))) + '</div></div>' +
-    '<div class="pl-detail-actions"><button class="pl-detail-play" type="button" data-pl-detail-play="' + escHtml(key) + '"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>播放歌单</button>' + collectionButton + '<button class="fx-mini-btn ghost pl-detail-top-btn" type="button" data-pl-detail-top="1">回到顶部</button></div>' +
+    '<div class="pl-detail-actions"><button class="pl-detail-play" type="button" data-pl-detail-play="' + escHtml(key) + '"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>播放歌单</button>' + collectionButton + deleteButton + '<button class="fx-mini-btn ghost pl-detail-top-btn" type="button" data-pl-detail-top="1">回到顶部</button></div>' +
     '</div>' +
     '<div class="pl-detail-list" data-pl-detail-scroll="' + escHtml(key) + '">' + rows + '</div>' +
     '</div>';
@@ -828,6 +1143,13 @@ document.getElementById('pl-list').addEventListener('click', function (e) {
     e.preventDefault();
     e.stopPropagation();
     togglePlaylistPanelCollection(collection.getAttribute('data-pl-detail-collection') === '1');
+    return;
+  }
+  var deleteBtn = e.target && e.target.closest ? e.target.closest('[data-pl-detail-delete]') : null;
+  if (deleteBtn) {
+    e.preventDefault();
+    e.stopPropagation();
+    deleteDetailPlaylist();
     return;
   }
   var artist = e.target && e.target.closest ? e.target.closest('[data-pl-detail-artist]') : null;

@@ -339,6 +339,68 @@ function makeContentListManager() {
     }
   }
 
+  // 内容框当前歌单是否为"我的喜欢"类（移除按钮同时负责取消红心）
+  function contentIsLikedContext() {
+    var card = sourceCard && sourceCard.item;
+    if (!card) return false;
+    if (Number(card.specialType || 0) === 5) return true;
+    if (card.provider === 'spotify' && /^(spotify-liked|liked)$/.test(String(card.playlistId || '').replace(/^spotify:/, ''))) return true;
+    return typeof isLikedPlaylistContext === 'function'
+      && isLikedPlaylistContext(String(contentSource && contentSource.id || ''), playlistTitle, card);
+  }
+  // merged 内容框中，歌曲是否来自"喜欢类"来源歌单
+  function contentRowLikedSource(song) {
+    if (!contentSource || contentSource.provider !== MERGED_PLAYLIST_PROVIDER) return contentIsLikedContext();
+    var src = typeof resolveMergedTrackSource === 'function' ? resolveMergedTrackSource(song) : null;
+    if (!src) return false;
+    if (src.provider === 'spotify') return src.id === 'spotify-liked' || src.id === 'liked';
+    var sourcePl = (typeof userPlaylists !== 'undefined' ? userPlaylists : []).find(function (pl) {
+      return normalizePlaylistProvider(pl && pl.provider) === src.provider && String(pl && pl.id || '') === src.id;
+    });
+    if (sourcePl) return Number(sourcePl.specialType || 0) === 5 || isLikedPlaylistContext(src.id, sourcePl.name, sourcePl);
+    return /我喜欢|喜欢的音乐|liked/i.test(String(src.id || ''));
+  }
+  // 内容框歌曲是否可"从歌单移除"（merged 按来源定位，喜欢类歌单也可移除并取消红心）
+  function contentRowCanRemove(song) {
+    if (!song || !song.id || !contentSource) return false;
+    if (contentSource.provider === MERGED_PLAYLIST_PROVIDER) {
+      var src = typeof resolveMergedTrackSource === 'function' ? resolveMergedTrackSource(song) : null;
+      if (!src || !src.id) return false;
+      var adapter = songAccountAdapter(src.provider);
+      return !!(adapter && adapter.playlistRemoveUrl);
+    }
+    var adapter = songAccountAdapter(contentSource.provider);
+    return !!(adapter && adapter.playlistRemoveUrl);
+  }
+  // 移除中心行歌曲：从来源平台歌单移除，成功后同步从内容框列表与合并歌单移除
+  async function removeRowAt(row) {
+    var song = row && row.song;
+    if (!song || !contentRowCanRemove(song)) return false;
+    var source;
+    if (contentSource && contentSource.provider === MERGED_PLAYLIST_PROVIDER) {
+      var src = typeof resolveMergedTrackSource === 'function' ? resolveMergedTrackSource(song) : null;
+      if (!src || !src.id) { showToast('无法定位该歌曲的来源歌单，暂不能移除'); return false; }
+      source = { provider: src.provider, id: src.id, merged: true, liked: contentRowLikedSource(song), likedPlaylist: contentRowLikedSource(song) };
+    } else {
+      source = { provider: contentSource.provider, id: contentSource.id, merged: false, liked: contentIsLikedContext(), likedPlaylist: contentIsLikedContext() };
+    }
+    var ok = await removeSongFromSourcePlaylist(song, source);
+    if (ok) {
+      var idx = row.index;
+      if (idx < 0 || idx >= allTracks.length || allTracks[idx] !== song) {
+        idx = allTracks.indexOf(song);
+      }
+      if (idx >= 0) allTracks.splice(idx, 1);
+      contentTotalCount = Math.max(0, contentTotalCount - 1);
+      centerTarget = Math.max(0, Math.min(allTracks.length - 1, centerTarget));
+      panelDirty = true;
+      rowsDirty = true;
+      syncRenderedRows(true);
+      drawPanelIfNeeded(true);
+    }
+    return ok;
+  }
+
   function drawPanelIfNeeded(force, nowT) {
     nowT = nowT == null ? (uniforms.uTime.value || 0) : nowT;
     if (!force && !panelDirty && (!isLoadingContent() || nowT - panelDrawAt < LOADING_ANIM_INTERVAL)) return;
@@ -409,7 +471,9 @@ function makeContentListManager() {
     var textX = (actionReady || hasSongCover) ? 154 : 82;
     var btnW = 104, btnH = 48, btnX = W - 144, btnY = H / 2 - btnH / 2;
     var miniBtn = 44, likeX = btnX - 156, collectX = btnX - 104, nextX = btnX - 52;
-    var textMax = actionReady && isCenter ? (isPodcastRadio ? btnX - textX - 24 : likeX - textX - 24) : W - textX - 42;
+    var removeX = likeX - 52;
+    var rowCanRemove = actionReady && !isPodcastRadio && contentRowCanRemove(song);
+    var textMax = actionReady && isCenter ? (isPodcastRadio ? btnX - textX - 24 : (rowCanRemove ? removeX - textX - 24 : likeX - textX - 24)) : W - textX - 42;
     var loadingRow = !playable && isLoadingLabel(song && song.name);
     if (loadingRow) {
       ctx.font = '700 22px Inter, "Microsoft YaHei", Arial';
@@ -440,6 +504,22 @@ function makeContentListManager() {
     // center 行右侧显示红心/收藏/播放按钮
     if (isCenter && actionReady) {
       if (!isPodcastRadio) {
+        // 从歌单移除按钮（仅可移除的歌曲显示，位于最左侧）
+        if (rowCanRemove) {
+          makeRoundRect(ctx, removeX, btnY + 2, miniBtn, btnH - 4, 15);
+          ctx.fillStyle = 'rgba(255,90,70,0.09)'; ctx.fill();
+          ctx.strokeStyle = 'rgba(255,120,100,0.30)';
+          ctx.lineWidth = 1.1;
+          ctx.stroke();
+          var rmCx = removeX + miniBtn / 2, rmCy = btnY + btnH / 2;
+          ctx.strokeStyle = 'rgba(255,150,130,0.92)';
+          ctx.lineWidth = 2.6;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(rmCx - 9, rmCy - 9); ctx.lineTo(rmCx + 9, rmCy + 9);
+          ctx.moveTo(rmCx + 9, rmCy - 9); ctx.lineTo(rmCx - 9, rmCy + 9);
+          ctx.stroke();
+        }
         var liked = isSongLiked(song);
         makeRoundRect(ctx, likeX, btnY + 2, miniBtn, btnH - 4, 15);
         ctx.fillStyle = liked ? 'rgba(255,122,144,0.18)' : 'rgba(255,255,255,0.075)';
@@ -1081,6 +1161,8 @@ function makeContentListManager() {
       var h = Math.max(1, maxY - minY);
       var u = clampRange((sx - minX) / w, 0, 1);
       var v = clampRange((sy - minY) / h, 0, 1);
+      // 移除按钮位于最左侧（u 0.56-0.615），仅在按钮真实绘制时命中（先于红心判断）
+      if (u > 0.54 && u < 0.62 && v > 0.12 && v < 0.88 && contentRowCanRemove(row && row.song)) return 'remove';
       if (u > 0.60 && u < 0.68 && v > 0.12 && v < 0.88) return 'like';
       if (u >= 0.68 && u < 0.75 && v > 0.12 && v < 0.88) return 'collect';
       if (u >= 0.75 && u < 0.82 && v > 0.12 && v < 0.88) return 'next';
@@ -1120,7 +1202,10 @@ function makeContentListManager() {
       // 关闭内容框
       var sm = shelfManager;
       if (sm) safeShelfCloseContent('content-play-row');
-    }
+    },
+    removeRowAt: removeRowAt,
+    // 供交互层判断行是否真实绘制了"从歌单移除"按钮（避免吞掉不可移除行的点击）
+    canRemoveRow: function (row) { return contentRowCanRemove(row && row.song); }
   };
 
   function makeRow(song, i) {

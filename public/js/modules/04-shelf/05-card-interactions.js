@@ -67,6 +67,24 @@ function isShelfPlaylistPlayHit(hit) {
   if (!hit || !hit.card || !hit.uv || !hit.card.item || hit.card.item.type !== 'playlist') return false;
   return hit.uv.x >= 0.49 && hit.uv.x <= 0.72 && hit.uv.y >= 0.13 && hit.uv.y <= 0.42;
 }
+// 3D 歌单架中央卡片右下角"删除歌单"按钮命中检测（uv 坐标，原点左下）。
+// 仅当按钮真实绘制（可删除歌单）时命中，避免吞掉不可删除歌单的右缘点击。
+function isShelfPlaylistDeleteHit(hit) {
+  if (!hit || !hit.card || !hit.uv || !hit.card.item || hit.card.item.type !== 'playlist') return false;
+  if (typeof shelfPlaylistCanDelete !== 'function' || !shelfPlaylistCanDelete(hit.card.item)) return false;
+  // 按钮像素 x 632-702 / y 264-302 → u 0.878-0.975 / v 0.161-0.267
+  return hit.uv.x >= 0.878 && hit.uv.x <= 1.0 && hit.uv.y >= 0.13 && hit.uv.y <= 0.30;
+}
+// 删除 3D 歌单架上的歌单：解析 playlistId 前缀并复用歌单删除核心逻辑
+function deleteShelfPlaylistCard(item) {
+  if (!item || typeof shelfPlaylistCanDelete !== 'function' || !shelfPlaylistCanDelete(item)) return;
+  var pid = String(item.playlistId || '');
+  var sep = pid.indexOf(':');
+  var id = sep >= 0 ? pid.slice(sep + 1) : pid;
+  if (typeof deletePlaylistByKey === 'function') {
+    deletePlaylistByKey(item.provider, id, item.title);
+  }
+}
 renderer.domElement.addEventListener('click', function (e) {
   if (!shelfManager || shelfManager.getMode() === 'off') return;
   if (typeof shelfPlaybackSwitchGuardActive === 'function' && shelfPlaybackSwitchGuardActive()) return;
@@ -88,17 +106,22 @@ renderer.domElement.addEventListener('click', function (e) {
         if (cl.pulseRow) cl.pulseRow(rowHit.row, 0.72);
         var selectedRow = Math.abs(rowHit.row.index - cl.getCenterIdx()) < 0.5;
         var rowIsPodcastRadio = !!(rowHit.row.song && rowHit.row.song.type === 'podcast-radio');
+        var hitRemoveButton = rowHit.uv && rowHit.uv.x >= 0.54 && rowHit.uv.x < 0.62 && rowHit.uv.y > 0.20 && rowHit.uv.y < 0.82
+          && (!cl.canRemoveRow || cl.canRemoveRow(rowHit.row));
         var hitLikeButton = rowHit.uv && rowHit.uv.x > 0.61 && rowHit.uv.x < 0.68 && rowHit.uv.y > 0.20 && rowHit.uv.y < 0.82;
         var hitCollectButton = rowHit.uv && rowHit.uv.x >= 0.68 && rowHit.uv.x < 0.75 && rowHit.uv.y > 0.20 && rowHit.uv.y < 0.82;
         var hitNextButton = rowHit.uv && rowHit.uv.x >= 0.75 && rowHit.uv.x < 0.82 && rowHit.uv.y > 0.20 && rowHit.uv.y < 0.82;
         var hitPlayButton = rowHit.uv && rowHit.uv.x >= 0.82 && rowHit.uv.y > 0.20 && rowHit.uv.y < 0.82;
         var screenAction = (!rowHit.uv && cl.rowActionAtScreen) ? cl.rowActionAtScreen(rowHit.row, e.clientX, e.clientY) : null;
+        hitRemoveButton = hitRemoveButton || screenAction === 'remove';
         hitLikeButton = hitLikeButton || screenAction === 'like';
         hitCollectButton = hitCollectButton || screenAction === 'collect';
         hitNextButton = hitNextButton || screenAction === 'next';
         hitPlayButton = hitPlayButton || screenAction === 'play';
-        // 详情页支持直接点歌曲播放；红心/收藏按钮仍然保留原动作。
-        if (selectedRow && !rowIsPodcastRadio && hitLikeButton) {
+        // 详情页支持直接点歌曲播放；红心/收藏/移除按钮仍然保留原动作。
+        if (selectedRow && !rowIsPodcastRadio && hitRemoveButton) {
+          if (cl.removeRowAt) cl.removeRowAt(rowHit.row);
+        } else if (selectedRow && !rowIsPodcastRadio && hitLikeButton) {
           toggleLikeDetailSong(rowHit.row.song);
         } else if (selectedRow && !rowIsPodcastRadio && hitCollectButton) {
           collectDetailSong(rowHit.row.song);
@@ -130,6 +153,10 @@ renderer.domElement.addEventListener('click', function (e) {
     if (mode === 'side') setShelfPinnedOpen(true, true);
     var idx = hit.card.index;
     if (Math.abs(idx - shelfManager.getCenterIdx()) < 0.5) {
+      if (isShelfPlaylistDeleteHit(hit)) {
+        deleteShelfPlaylistCard(hit.card.item);
+        return;
+      }
       if (isShelfPlaylistPlayHit(hit) && shelfManager.playPlaylistAt && shelfManager.playPlaylistAt(idx)) return;
       shelfManager.openContent(idx);
     } else {

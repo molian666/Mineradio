@@ -142,11 +142,12 @@ function workflowBezierPath(a, b) {
     ', ' + b.x.toFixed(1) + ' ' + b.y.toFixed(1);
 }
 function appendWorkflowPath(svg, from, to, className) {
-  if (!svg || !from || !to) return;
+  if (!svg || !from || !to) return null;
   var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
   path.setAttribute('d', workflowBezierPath(from, to));
   path.setAttribute('class', className || 'workflow-link');
   svg.appendChild(path);
+  return path;
 }
 function clearWorkflowSvg(svg) {
   if (!svg) return;
@@ -163,7 +164,8 @@ function renderLoginWorkflowEdges(tempPoint) {
   var mrIn = graph.querySelector('[data-login-mr-target="mr"]');
   loginWorkflowConnectedProviders().forEach(function (provider) {
     var providerOut = graph.querySelector('[data-login-provider-output="' + provider + '"]');
-    appendWorkflowPath(svg, workflowPointForPort(providerOut, graph), workflowPointForPort(mrIn, graph), 'workflow-link active' + (provider === loginProvider ? ' selected' : ''));
+    var path = appendWorkflowPath(svg, workflowPointForPort(providerOut, graph), workflowPointForPort(mrIn, graph), 'workflow-link active' + (provider === loginProvider ? ' selected' : ''));
+    bindLoginWorkflowDisconnectEdge(path, provider);
   });
   if (loginWorkflowPendingProvider && !providerHasLiveLogin(loginWorkflowPendingProvider)) {
     var pendingOut = graph.querySelector('[data-login-provider-output="' + loginWorkflowPendingProvider + '"]');
@@ -171,6 +173,106 @@ function renderLoginWorkflowEdges(tempPoint) {
   }
   if (loginWorkflowDrag && tempPoint) {
     appendWorkflowPath(svg, workflowPointForPort(loginWorkflowDrag.port, graph), loginWorkflowSnapPoint(tempPoint, graph), 'workflow-link temp');
+  }
+}
+var loginWorkflowDisconnectBusy = {};
+function bindLoginWorkflowDisconnectEdge(visiblePath, provider) {
+  if (!visiblePath || !provider) return;
+  provider = normalizeLoginProviderKey(provider);
+  var svg = visiblePath.parentNode;
+  if (!svg) return;
+  var meta = platformMeta(provider);
+  // 在可见线下方铺一条透明宽描边的命中层，便于点击断开
+  var hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  hit.setAttribute('d', visiblePath.getAttribute('d'));
+  hit.setAttribute('class', 'workflow-link hit');
+  hit.setAttribute('data-workflow-disconnect', provider);
+  var hitTitle = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+  hitTitle.textContent = '点击断开并退出' + (meta.label || provider) + '登录';
+  hit.appendChild(hitTitle);
+  svg.appendChild(hit);
+  hit.addEventListener('pointerdown', function (e) {
+    e.stopPropagation();
+  });
+  hit.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    disconnectLoginWorkflowProvider(provider);
+  });
+}
+async function disconnectLoginWorkflowProvider(provider) {
+  provider = normalizeLoginProviderKey(provider);
+  if (loginWorkflowDisconnectBusy[provider]) return;
+  loginWorkflowDisconnectBusy[provider] = true;
+  var meta = platformMeta(provider);
+  var label = (meta && meta.label) || provider;
+  var hitPath = document.querySelector('[data-workflow-disconnect="' + provider + '"]');
+  if (hitPath) hitPath.classList.add('busy');
+  try {
+    try {
+      await apiJson(provider === 'netease' ? '/api/logout' : '/api/' + provider + '/logout');
+    } catch (e) { }
+    try {
+      var clearFns = {
+        netease: 'clearNeteaseMusicLogin',
+        qq: 'clearQQMusicLogin',
+        kugou: 'clearKugouMusicLogin',
+        qishui: 'clearQishuiMusicLogin',
+        spotify: 'clearSpotifyMusicLogin'
+      };
+      var clearFn = clearFns[provider];
+      if (clearFn && window.desktopWindow && typeof window.desktopWindow[clearFn] === 'function') {
+        await window.desktopWindow[clearFn]();
+      }
+    } catch (e) { }
+    if (provider === 'netease') {
+      loginStatus = { loggedIn: false };
+      neteasePlaylists = [];
+      myPodcastCollections = [];
+      myPodcastItems = {};
+      likedSongMap = {};
+    } else if (provider === 'qq') {
+      if (typeof clearQQPlaybackVipEvidence === 'function') clearQQPlaybackVipEvidence();
+      qqLoginStatus = { provider: 'qq', loggedIn: false, preview: false, nickname: 'QQ 音乐', userId: '', avatar: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false };
+      qqPlaylists = [];
+    } else if (provider === 'kugou') {
+      kugouLoginStatus = { provider: 'kugou', loggedIn: false, preview: false, nickname: '酷狗音乐', userId: '', avatar: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, playbackKeyReady: false };
+      kugouPlaylists = [];
+    } else if (provider === 'qishui') {
+      qishuiLoginStatus = { provider: 'qishui', loggedIn: false, configured: false, oauthConfigured: false, oauthMissing: [], preview: false, nickname: '汽水音乐', userId: '', avatar: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, playbackKeyReady: false, playbackMode: 'recommend-match' };
+      qishuiPlaylists = [];
+    } else {
+      spotifyLoginStatus = { provider: 'spotify', loggedIn: false, configured: false, oauthConfigured: false, oauthMissing: [], preview: false, nickname: 'Spotify', userId: '', avatar: '', product: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, playbackKeyReady: false, playbackMode: 'recommend-match', tokenConfigured: false, tokenFileExists: false, credentialsFileExists: false, localConfigMissing: false };
+      spotifyPlaylists = [];
+    }
+    // 断开工作流连接：清除会话验证与待连接标记，使该平台不再出现在已接入列表
+    if (loginWorkflowVerifiedSession) delete loginWorkflowVerifiedSession[provider];
+    if (loginWorkflowPendingProvider === provider) loginWorkflowPendingProvider = '';
+    userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== provider; });
+    playlistCatalogRevision += 1;
+    if (!hasPlatformLogin(provider) || loggedProviderCount() < 2) dualAccountMode = false;
+    activeAccountProvider = firstLoggedProvider();
+    if (typeof closeCollectModal === 'function') closeCollectModal();
+    if (typeof renderUserBtn === 'function') renderUserBtn();
+    if (hasAnyPlatformLogin()) {
+      if (typeof updateUserModalUi === 'function') updateUserModalUi();
+    } else if (typeof closeUserModal === 'function') {
+      closeUserModal();
+    }
+    setLoginAuthDrawerOpen(hasLoginWorkflowConnection(loginProvider) || loginWorkflowPendingProvider === loginProvider);
+    if (typeof safeRenderQueuePanel === 'function') {
+      safeRenderQueuePanel('login-panel-disconnect', { scrollCurrent: !!(typeof miniQueueOpen !== 'undefined' && miniQueueOpen) });
+    }
+    if (typeof safeShelfRebuild === 'function') safeShelfRebuild('login-panel-disconnect');
+    if (typeof updateLikeButtons === 'function') updateLikeButtons();
+    if (typeof updateLoginProviderUi === 'function') updateLoginProviderUi();
+    showToast('已断开并退出' + label + '登录');
+  } catch (err) {
+    console.warn('断开平台登录失败:', err);
+    showToast('断开失败，请重试');
+  } finally {
+    loginWorkflowDisconnectBusy[provider] = false;
+    if (hitPath) hitPath.classList.remove('busy');
   }
 }
 function scheduleLoginWorkflowEdges(reason) {

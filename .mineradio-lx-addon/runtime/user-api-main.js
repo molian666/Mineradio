@@ -57,7 +57,9 @@ function sourceExecutionError(session, error, phase) {
 function attachWindowDiagnostics(session) {
   const webContents = session.window?.webContents;
   if (!webContents?.on) return;
-  const consoleListener = (_event, level, message) => {
+  const consoleListener = (_event, details) => {
+    const level = details?.level;
+    const message = details?.message;
     const normalizedLevel = String(level || '').toLowerCase();
     if (normalizedLevel === 'error' || normalizedLevel === 'warning' || normalizedLevel === 'warn' || typeof level === 'number' && level >= 2) {
       recordWindowDiagnostic(session, 'console', message);
@@ -740,11 +742,16 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
         preloadPath,
         userData: app?.getPath?.('userData'),
         metadata: source.metadata,
-        onSession: session => { loadingSession = session; }
+        onSession: session => {
+          loadingSession = session;
+          // UserApi scripts can request network data during initialization.
+          activeSession = session;
+        }
       });
       activeSession = loaded.session;
       return loaded;
     } catch (error) {
+      if (activeSession === loadingSession) activeSession = null;
       await disposeUserApiSession(loadingSession);
       throw error;
     }

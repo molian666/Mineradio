@@ -209,6 +209,8 @@ function bindPlaybackProgressEvents(audioEl) {
       if (name === 'ended' && audioEl === audio && playbackTransitionHasAudibleNextDeck()) return;
       syncPlaybackStateFromAudioEvent(name);
       saveLastPlaybackSnapshot(name === 'pause' || name === 'ended', name);
+      if (name === 'play' || name === 'playing') scheduleProgressMaintenance();
+      else if (name === 'pause' || name === 'ended' || name === 'emptied' || name === 'abort' || name === 'error') clearProgressMaintenance();
     });
   });
   ['error', 'stalled'].forEach(function (name) {
@@ -489,7 +491,7 @@ progressBar.addEventListener('pointerup', function (e) { endProgressDrag(e, true
 progressBar.addEventListener('pointercancel', function (e) { endProgressDrag(e, false); });
 progressBar.addEventListener('lostpointercapture', function (e) { endProgressDrag(e, true); });
 var hiddenBackgroundTickAt = 0;
-setInterval(function () {
+function runProgressMaintenance() {
   var hidden = document.hidden || (typeof isDeepBackgroundMode === 'function' && isDeepBackgroundMode());
   if (hidden) {
     // 后台：跳过 UI DOM 更新；仍低频累计听歌统计与播放进度快照（防止
@@ -516,7 +518,32 @@ setInterval(function () {
   updateListenStatsTick(false);
   updatePlaybackProgressUi();
   saveLastPlaybackSnapshot(false, 'tick');
-}, 200);
+}
+var progressMaintenanceTimer = 0;
+function clearProgressMaintenance() {
+  if (progressMaintenanceTimer) clearTimeout(progressMaintenanceTimer);
+  progressMaintenanceTimer = 0;
+}
+function progressMaintenanceIsHidden() {
+  return !!(document.hidden || (typeof isDeepBackgroundMode === 'function' && isDeepBackgroundMode()));
+}
+function scheduleProgressMaintenance() {
+  if (!audio || audio.paused || audio.ended) {
+    clearProgressMaintenance();
+    return;
+  }
+  if (progressMaintenanceTimer) return;
+  progressMaintenanceTimer = setTimeout(function () {
+    progressMaintenanceTimer = 0;
+    runProgressMaintenance();
+    scheduleProgressMaintenance();
+  }, progressMaintenanceIsHidden() ? 1000 : 200);
+}
+document.addEventListener('visibilitychange', function () {
+  if (audio && !audio.paused && !audio.ended) scheduleProgressMaintenance();
+  else clearProgressMaintenance();
+});
+window.addEventListener('pagehide', clearProgressMaintenance, { once: true });
 
 // ============================================================
 //  文件拖放

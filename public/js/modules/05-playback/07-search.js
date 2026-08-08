@@ -572,6 +572,16 @@ async function findControlSourceMatchResult(song, provider) {
     var score = typeof scoreSongSearchResult === 'function' ? scoreSongSearchResult(candidate, query, i) : 0;
     if (typeof isSameTitleArtist === 'function' && isSameTitleArtist(song, candidate)) score += 120;
     if (candidate && candidate.playable === false) score -= 18;
+    // 时长接近度：同名同歌手的 Live/重制版时长不同，歌词会整体错位；时长越接近越可能是同一录音
+    var refSec = typeof playbackDurationFromSong === 'function' ? playbackDurationFromSong(song) : 0;
+    var candSec = typeof playbackDurationFromSong === 'function' ? playbackDurationFromSong(candidate) : 0;
+    if (refSec > 0 && candSec > 0) {
+      var delta = Math.abs(refSec - candSec);
+      var tolerance = Math.max(5, refSec * 0.08);
+      if (delta <= tolerance) score += 46;
+      else if (delta <= tolerance * 2.5) score -= 30;
+      else score -= 90;
+    }
     if (score > bestScore) {
       bestScore = score;
       best = candidate;

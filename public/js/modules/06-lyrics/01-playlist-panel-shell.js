@@ -506,13 +506,41 @@ function setPlaylistCatalogProviderArray(provider, rows) {
   else if (provider === 'qishui') qishuiPlaylists = rows;
   else if (provider === 'spotify') spotifyPlaylists = rows;
 }
+function kugouPlaylistSyncReady(status) {
+  // Reading the catalog may work with the authenticated web cookie before
+  // the separate playback token has finished settling.
+  return !!(status && status.loggedIn);
+}
+function kugouPlaylistCatalogNeedsRefresh(status, hasRows, catalogFailed) {
+  return !!(status && status.loggedIn) && (!hasRows || !!catalogFailed);
+}
+function applyPlaylistCatalogSyncResult(previousRows, response) {
+  var previous = Array.isArray(previousRows) ? previousRows : [];
+  if (!response || typeof response !== 'object') {
+    return { rows: previous, synced: false, error: 'INVALID_PLAYLIST_CATALOG_RESPONSE' };
+  }
+  if (response.error || !Array.isArray(response.playlists)) {
+    return {
+      rows: previous,
+      synced: false,
+      error: String(response.error || 'INVALID_PLAYLIST_CATALOG_RESPONSE')
+    };
+  }
+  return { rows: response.playlists.slice(), synced: true, error: '' };
+}
 function playlistCatalogProviderLoggedIn(provider) {
   if (provider === 'netease') return !!loginStatus.loggedIn;
   if (provider === 'qq') return !!qqLoginStatus.loggedIn;
-  if (provider === 'kugou') return !!kugouLoginStatus.loggedIn;
+  if (provider === 'kugou') return kugouPlaylistSyncReady(kugouLoginStatus);
   if (provider === 'qishui') return !!qishuiLoginStatus.loggedIn;
   if (provider === 'spotify') return !!spotifyLoginStatus.loggedIn;
   return false;
+}
+function playlistCatalogProviderSyncFailed(provider) {
+  var state = playlistCatalogSyncState && playlistCatalogSyncState.providers
+    ? playlistCatalogSyncState.providers[provider]
+    : null;
+  return !!(state && state.error);
 }
 function playlistCatalogPageUrl(provider, offset, limit) {
   offset = Math.max(0, Number(offset) || 0);
@@ -545,6 +573,14 @@ function rebuildUserPlaylistsFromCatalog(opts) {
     ? playlistCatalogView(allProviderRows, !!(fx && fx.shelfMergeCollections))
     : allProviderRows;
   if (!(fx && fx.shelfMergeCollections) && typeof applyUserPlaylistOrder === 'function') applyUserPlaylistOrder();
+  console.log('[KugouPlaylistSync][renderer] catalog-rebuilt', {
+    reason: opts.reason || '',
+    mergeEnabled: !!(fx && fx.shelfMergeCollections),
+    providerRows: (kugouPlaylists || []).length,
+    catalogRows: userPlaylists.length,
+    visibleKugouRows: userPlaylists.filter(function (pl) { return pl && pl.provider === 'kugou'; }).length,
+    visibleProviders: userPlaylists.map(function (pl) { return pl && pl.provider || ''; }).filter(Boolean).slice(0, 20)
+  });
   playlistCatalogRevision += 1;
   renderUserPlaylistsList({ animate: !!opts.animate, reset: !!opts.reset, preserveScroll: opts.preserveScroll !== false });
   if (emptyHomeActive) renderHomeDiscover();
@@ -564,8 +600,18 @@ async function loadPlaylistCatalogProviderPage(provider, reason) {
   try {
     var r = await apiJson(url, { timeoutMs: 15000 });
     if (playlistCatalogSyncState.token !== token) return false;
-    var incoming = (r && r.playlists || []).map(function (pl) { pl.provider = provider; pl.source = provider; return pl; });
-    if (r && r.error && !incoming.length) throw new Error(r.message || r.error);
+    if (provider === 'kugou') {
+      console.log('[KugouPlaylistSync][renderer] response', {
+        loggedIn: !!(r && r.loggedIn),
+        playbackReady: !!(r && r.playbackReady),
+        playlistCount: Array.isArray(r && r.playlists) ? r.playlists.length : -1,
+        hasError: !!(r && r.error),
+        error: String(r && r.error || '')
+      });
+    }
+    var syncResult = applyPlaylistCatalogSyncResult(playlistCatalogProviderArray(provider), r);
+    if (!syncResult.synced) throw new Error((r && r.message) || syncResult.error);
+    var incoming = syncResult.rows.map(function (pl) { pl.provider = provider; pl.source = provider; return pl; });
     var current = first ? [] : playlistCatalogProviderArray(provider);
     var merged = mergePlaylistCatalogRows(current, incoming, provider);
     setPlaylistCatalogProviderArray(provider, merged);
@@ -581,6 +627,12 @@ async function loadPlaylistCatalogProviderPage(provider, reason) {
     return incoming.length > 0;
   } catch (e) {
     if (playlistCatalogSyncState.token !== token) return false;
+    if (provider === 'kugou') {
+      console.warn('[KugouPlaylistSync][renderer] failed', {
+        reason: reason || '',
+        error: e && e.message || 'PLAYLIST_CATALOG_PAGE_FAILED'
+      });
+    }
     console.warn('[PlaylistCatalogPage]', provider, e);
     state.error = e && e.message || 'PLAYLIST_CATALOG_PAGE_FAILED';
     state.hasMore = false;
@@ -661,6 +713,15 @@ async function restoreMergedPlaylistCatalogCache() {
   return true;
 }
 async function refreshUserPlaylists(force) {
+  console.log('[KugouPlaylistSync][renderer] refresh-start', {
+    force: !!force,
+    mergeEnabled: !!(fx && fx.shelfMergeCollections),
+    loggedIn: !!(kugouLoginStatus && kugouLoginStatus.loggedIn),
+    playbackReady: !!(kugouLoginStatus && kugouLoginStatus.playbackKeyReady),
+    cachedProviderRows: (kugouPlaylists || []).length,
+    catalogRows: (userPlaylists || []).length,
+    catalogLoading: !!(playlistCatalogSyncState && playlistCatalogSyncState.loading)
+  });
   if (!loginStatus.loggedIn && !qqLoginStatus.loggedIn && !kugouLoginStatus.loggedIn && !qishuiLoginStatus.loggedIn && !spotifyLoginStatus.loggedIn) {
     resetPlaylistPanelRenderLimit();
     document.getElementById('pl-list').innerHTML = '<div style="text-align:center;padding:24px 0;color:rgba(255,255,255,.32);font-size:11.5px">登录后显示个人歌单</div>';

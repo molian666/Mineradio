@@ -5562,6 +5562,13 @@ body.home-controls-locked #bottom-bar {
   text-shadow: 0 0 12px rgba(0, 245, 212, .16)
 }
 
+/* 播放栏歌词按钮：桌面歌词开启态（与应用内歌词的青色 active 区分） */
+.ctrl-btn.lyrics-toggle-btn.desktop-active {
+  color: rgba(160, 218, 255, .95);
+  text-shadow: 0 0 14px rgba(96, 178, 255, .38);
+  background: rgba(96, 178, 255, .08)
+}
+
 .ctrl-btn.liked {
   color: #ff7a90;
   text-shadow: 0 0 18px rgba(255, 122, 144, .36)
@@ -6083,6 +6090,24 @@ body:not(.controls-visible) .lyric-timing-control::before,
   stroke: rgba(244, 210, 138, .50);
   stroke-dasharray: 5 6;
   filter: drop-shadow(0 0 7px rgba(244, 210, 138, .18))
+}
+
+.workflow-link-layer .workflow-link.hit {
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+  filter: none;
+  transition: stroke .16s ease
+}
+
+.workflow-link-layer .workflow-link.hit:hover {
+  stroke: rgba(255, 92, 108, .16)
+}
+
+.workflow-link-layer .workflow-link.hit.busy {
+  cursor: wait;
+  stroke: rgba(255, 92, 108, .10)
 }
 
 .flow-port {
@@ -7232,6 +7257,7 @@ body.diy-mode #controls {
 @media (max-width:940px) {
 
   body.diy-mode .lyrics-toggle-btn,
+  body.diy-mode #desktop-lyrics-btn,
   body.diy-mode #volume-control,
   body.diy-mode .fullscreen-toggle-btn {
     display: none !important
@@ -7353,6 +7379,7 @@ body.immersive-mode #heart-btn,
 body.immersive-mode #collect-btn,
 body.immersive-mode #play-mode-btn,
 body.immersive-mode .lyrics-toggle-btn,
+body.immersive-mode #desktop-lyrics-btn,
 body.immersive-mode #mini-queue-btn,
 body.immersive-mode #quality-control,
 body.immersive-mode #volume-control,
@@ -14372,6 +14399,54 @@ html:fullscreen body.desktop-shell #playlist-panel {
   min-width: 82px;
   flex: 0 0 auto;
   padding: 0 12px
+}
+
+.pl-detail-delete-btn:hover {
+  border-color: rgba(255, 120, 100, .50);
+  background: rgba(255, 90, 70, .12);
+  color: rgba(255, 150, 130, .95)
+}
+
+.pl-detail-row .pl-detail-act {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 255, 255, .48);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  transition: all .15s
+}
+
+.pl-detail-row .pl-detail-act .heart-svg {
+  width: 14px;
+  height: 14px
+}
+
+.pl-detail-row .pl-detail-act:hover {
+  background: rgba(255, 255, 255, .08);
+  color: #fff
+}
+
+.pl-detail-row .pl-detail-act.liked {
+  color: #ff7a90;
+  background: rgba(255, 122, 144, .08)
+}
+
+.pl-detail-row .pl-detail-remove {
+  font-size: 15px
+}
+
+.pl-detail-row .pl-detail-remove:hover {
+  color: rgba(255, 150, 130, .95);
+  background: rgba(255, 90, 70, .10)
 }
 
 .pl-detail-list {

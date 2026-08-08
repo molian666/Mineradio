@@ -25,9 +25,17 @@ function drawCanvasHeart(ctx, cx, cy, size, color) {
 function requestPlaylistCover(url, cb) {
   if (!url) { if (cb) cb(null); return; }
   var rec = playlistCoverCache[url];
+  if (rec) touchRuntimeCacheEntry(playlistCoverCache, url);
   if (rec && rec.loaded) { if (cb) setTimeout(function () { cb(rec.img); }, 0); return; }
   if (rec && rec.loading) { if (cb) rec.waiters.push(cb); return; }
-  rec = playlistCoverCache[url] = { loaded: false, loading: true, waiters: cb ? [cb] : [], img: null, failed: false };
+  rec = { loaded: false, loading: true, waiters: cb ? [cb] : [], img: null, failed: false };
+  rememberRuntimeCacheEntry(
+    playlistCoverCache,
+    url,
+    rec,
+    RUNTIME_RENDER_CACHE_LIMITS.playlistCovers,
+    typeof collectProtectedCoverUrls === 'function' ? collectProtectedCoverUrls() : null
+  );
   var img = new Image();
   if (!isInlineCoverSrc(url)) img.crossOrigin = 'anonymous';
   img.onload = function () {

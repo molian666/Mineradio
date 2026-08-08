@@ -1138,7 +1138,9 @@ var SONG_ACCOUNT_ACTION_ADAPTERS = {
     likeCheckParam: 'ids',
     likeUrl: '/api/song/like',
     playlistAddUrl: '/api/playlist/add-song',
+    playlistRemoveUrl: '/api/playlist/remove-song',
     playlistCreateUrl: '/api/playlist/create',
+    playlistDeleteUrl: '/api/playlist/delete',
     playlistTracksUrl: '/api/playlist/tracks'
   },
   kugou: {
@@ -1151,7 +1153,9 @@ var SONG_ACCOUNT_ACTION_ADAPTERS = {
     likeCheckParam: 'hashes',
     likeUrl: '/api/kugou/song/like',
     playlistAddUrl: '/api/kugou/playlist/add-song',
+    playlistRemoveUrl: '/api/kugou/playlist/remove-song',
     playlistCreateUrl: '',
+    playlistDeleteUrl: '',
     playlistTracksUrl: '/api/kugou/playlist/tracks'
   },
   spotify: {
@@ -1164,7 +1168,9 @@ var SONG_ACCOUNT_ACTION_ADAPTERS = {
     likeCheckParam: 'ids',
     likeUrl: '/api/spotify/song/like',
     playlistAddUrl: '/api/spotify/playlist/add-song',
+    playlistRemoveUrl: '/api/spotify/playlist/remove-song',
     playlistCreateUrl: '/api/spotify/playlist/create',
+    playlistDeleteUrl: '/api/spotify/playlist/delete',
     playlistTracksUrl: '/api/spotify/playlist/tracks'
   },
   qishui: {
@@ -1177,16 +1183,25 @@ var SONG_ACCOUNT_ACTION_ADAPTERS = {
     likeCheckParam: 'ids',
     likeUrl: QISHUI_LIKE_ACCOUNT_ACTIONS_ENABLED ? '/api/qishui/song/like' : '',
     playlistAddUrl: QISHUI_PLAYLIST_WRITE_ACTIONS_ENABLED ? '/api/qishui/playlist/add-song' : '',
+    playlistRemoveUrl: QISHUI_PLAYLIST_WRITE_ACTIONS_ENABLED ? '/api/qishui/playlist/remove-song' : '',
     playlistCreateUrl: '',
+    playlistDeleteUrl: '',
     playlistTracksUrl: '/api/qishui/playlist/tracks'
   },
   qq: {
     provider: 'qq',
     label: 'QQ 音乐',
-    like: false,
-    collect: false,
-    createPlaylist: false,
-    readOnly: true
+    like: true,
+    collect: true,
+    createPlaylist: true,
+    likeCheckUrl: '/api/qq/song/like/check',
+    likeCheckParam: 'ids',
+    likeUrl: '/api/qq/song/like',
+    playlistAddUrl: '/api/qq/playlist/add-song',
+    playlistRemoveUrl: '/api/qq/playlist/remove-song',
+    playlistCreateUrl: '/api/qq/playlist/create',
+    playlistDeleteUrl: '/api/qq/playlist/delete',
+    playlistTracksUrl: '/api/qq/playlist/tracks'
   }
 };
 function songAccountProvider(song) {
@@ -1264,6 +1279,9 @@ function isCloudSong(song) {
 }
 function isSongLiked(song) {
   var key = songAccountStateKey(song);
+  if (songAccountProvider(song) === 'qq' && typeof mergedHasLocalCollectSong === 'function') {
+    return mergedHasLocalCollectSong(song);
+  }
   return !!(key && likedSongMap[key]);
 }
 function ensureLoggedInForAction(provider) {
@@ -1313,10 +1331,17 @@ function songActionHtml(kind, source, index, song) {
 function syncLikeStatusForSongs(songs) {
   if (!songs || !songs.length) return;
   var groups = Object.create(null);
+  var localOnly = false;
   songs.forEach(function (song) {
     var provider = songAccountProvider(song);
     var adapter = songAccountAdapter(provider);
     var id = songAccountId(song, provider);
+    if (provider === 'qq') {
+      var localKey = songAccountStateKey(song);
+      if (localKey) likedSongMap[localKey] = isSongLiked(song);
+      localOnly = true;
+      return;
+    }
     if (!adapter || !adapter.like || !adapter.likeCheckUrl || !id || !isSongAccountLoggedIn(provider)) return;
     if (!groups[provider]) groups[provider] = { adapter: adapter, ids: [], seen: Object.create(null) };
     if (groups[provider].seen[id]) return;
@@ -1324,7 +1349,14 @@ function syncLikeStatusForSongs(songs) {
     groups[provider].ids.push(id);
   });
   var providers = Object.keys(groups);
-  if (!providers.length) return;
+  if (!providers.length) {
+    if (localOnly) {
+      safeRenderQueuePanel('like-status-local-sync', { scrollCurrent: miniQueueOpen });
+      if ($results && $results.classList.contains('show')) refreshSearchResultActionStates();
+      updateLikeButtons();
+    }
+    return;
+  }
   var token = ++likeStatusToken;
   var requests = [];
   providers.forEach(function (provider) {
@@ -1400,13 +1432,43 @@ async function toggleLikeSong(song) {
     showToast(songAccountUnsupportedMessage(provider, 'like'));
     return;
   }
-  if (!ensureLoggedInForAction(provider)) return;
   var id = songAccountId(song, provider);
   var stateKey = songAccountStateKey(song);
   if (!id || !stateKey) {
     showToast('当前歌曲缺少' + adapter.label + '歌曲标识');
     return;
   }
+  if (provider === 'qq') {
+    if (likeBusyMap[stateKey]) return;
+    var localNext = !isSongLiked(song);
+    likeBusyMap[stateKey] = true;
+    updateLikeButtons(song);
+    safeRenderQueuePanel('qq-local-like-optimistic', { scrollCurrent: miniQueueOpen });
+    refreshSearchResultActionStates();
+    try {
+      var localOk = localNext
+        ? (typeof mergedAddLocalCollectSong === 'function' && mergedAddLocalCollectSong(song))
+        : (typeof mergedRemoveLocalCollectSong === 'function' && mergedRemoveLocalCollectSong(song));
+      if (!localOk) throw new Error('LOCAL_COLLECT_FAILED');
+      likedSongMap[stateKey] = localNext;
+      showToast(localNext
+        ? 'QQ 音乐同步暂未实现，已加入合并歌单（本地收藏）'
+        : '已从合并歌单移除（本地收藏）');
+      if (typeof markMergedPlaylistDirty === 'function') {
+        markMergedPlaylistDirty(localNext ? 'qq-local-like' : 'qq-local-unlike').catch(function () { });
+      }
+    } catch (err) {
+      likedSongMap[stateKey] = !localNext;
+      showToast(localNext ? 'QQ 音乐同步暂未实现，本地收藏失败' : '合并歌单移除失败');
+    } finally {
+      delete likeBusyMap[stateKey];
+      updateLikeButtons(song);
+      safeRenderQueuePanel('qq-local-like-final', { scrollCurrent: miniQueueOpen });
+      refreshSearchResultActionStates();
+    }
+    return;
+  }
+  if (!ensureLoggedInForAction(provider)) return;
   if (likeBusyMap[stateKey]) return;
   var next = !likedSongMap[stateKey];
   likeBusyMap[stateKey] = true;
@@ -1473,6 +1535,36 @@ function closeCollectModal() {
     if (input) input.value = '';
   });
 }
+// 可写入的歌单：优先取目录视图（非合并模式），为空时回退到各平台原始歌单数组。
+// 合并歌单模式开启时 userPlaylists 仅含一条 virtual 合并记录，直接过滤会得到
+// 空列表导致无法收藏，因此必须回退到 neteasePlaylists / qqPlaylists 等原始行。
+function collectablePlaylists(provider) {
+  var fromCatalog = userPlaylists.filter(function (pl) {
+    return playlistAccountProvider(pl) === provider && !pl.subscribed && !pl.virtual;
+  });
+  if (fromCatalog.length) return fromCatalog;
+  var rows = (neteasePlaylists || []).concat(qqPlaylists || [], kugouPlaylists || [], qishuiPlaylists || [], spotifyPlaylists || []);
+  return rows.filter(function (pl) {
+    return playlistAccountProvider(pl) === provider && !pl.subscribed && !pl.virtual;
+  });
+}
+var collectModalCatalogPollTimer = 0;
+// 目录加载中打开收藏弹窗时的兜底：轮询等待目录就绪后重渲染；
+// 弹窗关闭（collectTargetSong 置空）即停止，不残留定时器。
+function pollCollectModalUntilCatalogReady() {
+  if (collectModalCatalogPollTimer) return;
+  function tryRender() {
+    collectModalCatalogPollTimer = 0;
+    if (!collectTargetSong) return;
+    var busy = !!(typeof playlistCatalogSyncState !== 'undefined' && playlistCatalogSyncState && playlistCatalogSyncState.loading);
+    if (busy) {
+      collectModalCatalogPollTimer = setTimeout(tryRender, 400);
+      return;
+    }
+    renderCollectModal();
+  }
+  collectModalCatalogPollTimer = setTimeout(tryRender, 400);
+}
 function renderCollectModal() {
   var current = document.getElementById('collect-current');
   var list = document.getElementById('collect-list');
@@ -1491,17 +1583,18 @@ function renderCollectModal() {
     list.innerHTML = '<div class="collect-empty">登录' + escHtml(adapter.label) + '后显示你的歌单</div>';
     return;
   }
-  if (!userPlaylists.length) {
-    list.innerHTML = miniQueueSkeleton();
-    return;
-  }
-  var mine = userPlaylists.filter(function (pl) {
-    return playlistAccountProvider(pl) === provider && !pl.subscribed && !pl.virtual;
-  });
-  if (!mine.length) {
+  if (!collectablePlaylists(provider).length) {
+    // 目录仍在加载时显示骨架并轮询等待，目录就绪后自动重渲染弹窗
+    var catalogBusy = !!(typeof playlistCatalogSyncState !== 'undefined' && playlistCatalogSyncState && playlistCatalogSyncState.loading);
+    if (catalogBusy) {
+      list.innerHTML = miniQueueSkeleton();
+      pollCollectModalUntilCatalogReady();
+      return;
+    }
     list.innerHTML = '<div class="collect-empty">还没有可写入的歌单，可以先新建一个</div>';
     return;
   }
+  var mine = collectablePlaylists(provider);
   list.innerHTML = mine.map(function (pl) {
     var thumb = pl.cover ? coverUrlWithSize(pl.cover, 80) : '';
     return '<div class="collect-item" data-collect-pid="' + escHtml(String(pl.id || '')) + '" onclick="addCollectTargetToPlaylist(this.getAttribute(\'data-collect-pid\'))">' +
@@ -1539,6 +1632,9 @@ async function createPlaylistFromCollect() {
     if (input) input.value = '';
     showToast('歌单已创建');
     await refreshUserPlaylists(true);
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty('playlist-create').catch(function () { });
+    }
     renderCollectModal();
     var created = r && r.playlist;
     var pid = created && created.id;
@@ -1621,13 +1717,33 @@ async function addCollectTargetToPlaylist(pid) {
     showToast('已收藏到歌单');
     closeCollectModal();
     refreshUserPlaylists(true);
+    // 收藏会改变对应平台歌单内容；若该歌单被纳入合并歌单，失效缓存并后台
+    // 重同步，保证合并歌单下次加载包含新收藏的歌曲。
+    if (typeof markMergedPlaylistDirty === 'function') {
+      markMergedPlaylistDirty('playlist-collect').catch(function () { });
+    }
     setTimeout(function () {
       verifySongInPlaylist(pid, targetSong).then(function (ok) {
         if (!ok) console.warn(provider + ' collect submitted but verify did not find song yet:', pid, songId);
       });
     }, 900);
   } catch (err) {
-    showToast(err && err.message ? err.message : '收藏失败');
+    var collectErrorText = String(err && err.message || '');
+    // 平台写操作（如 QQ 音乐收藏）暂不可用时：明确提示"暂未实现"，
+    // 并把歌曲先加入合并歌单的本地收藏，保证用户仍能使用这首歌曲。
+    if (provider === 'qq') {
+      var localOk = false;
+      if (typeof mergedAddLocalCollectSong === 'function') localOk = mergedAddLocalCollectSong(targetSong);
+      if (typeof markMergedPlaylistDirty === 'function') {
+        markMergedPlaylistDirty('playlist-collect-local').catch(function () { });
+      }
+      showToast(localOk
+        ? '同步到 QQ 音乐暂未实现，已加入合并歌单（本地收藏）'
+        : '同步到 QQ 音乐暂未实现');
+      closeCollectModal();
+    } else {
+      showToast(collectErrorText || '收藏失败');
+    }
   } finally {
     collectBusy = false;
     setCollectBusyPid(pid, false);

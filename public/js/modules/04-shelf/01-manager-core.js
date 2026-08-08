@@ -1,3 +1,15 @@
+// 3D 歌单架卡片"删除歌单"按钮可见性：与歌单详情面板一致
+// （自有、非"我的喜欢"、非合并歌单；具体平台是否支持由删除核心给出提示）
+// 全局函数：makeShelfManager 内部与 05-card-interactions.js 共用
+function shelfPlaylistCanDelete(item) {
+  if (!item || item.type !== 'playlist' || !item.provider) return false;
+  if (item.provider === MERGED_PLAYLIST_PROVIDER) return false;
+  if (item.virtual || item.specialType === 5 || item.subscribed) return false;
+  // Spotify 喜欢伪歌单（spotify-liked / liked）没有真实歌单实体，不可删除
+  if (item.provider === 'spotify' && /^(spotify-liked|liked)$/.test(String(item.playlistId || '').replace(/^spotify:/, ''))) return false;
+  return true;
+}
+
 function makeShelfManager() {
   var group = null;
   var cards = [];          // [{canvas, ctx, texture, mesh, item, index, slot}]
@@ -31,6 +43,7 @@ function makeShelfManager() {
   var contentList = null;     // 二级 PSP 滚动列表 manager
   var connectorParticles = null;
   var playlistPaneCache = { revision: -1, source: null, mine: [], fav: [] };
+  var lastKugouDiagnosticSig = '';
 
   // 一次性返回完整 items 数组 (不只 5 张, 全部参与 PSP 滚动)
   function splitPlaylists() {
@@ -73,7 +86,8 @@ function makeShelfManager() {
         if (provider === 'spotify' && String(pl.id || '').indexOf('spotify:') !== 0) pl = Object.assign({}, pl, { id: 'spotify:' + pl.id });
         return {
           type: 'playlist', title: pl.name, sub: sourceLabel + ' · ' + (pl.trackCount || 0) + ' 首 · 播放 ' + compactCount(pl.playCount || 0),
-          cover: pl.cover || '', tag: provider === MERGED_PLAYLIST_PROVIDER ? '跨平台歌单' : ((pl.shelfPane || pl.shelf_pane) === 'fav' || (!(pl.shelfPane || pl.shelf_pane) && pl.subscribed) ? '收藏歌单' : (provider === 'qishui' ? '汽水歌单' : '我的歌单')), playlistId: (provider === MERGED_PLAYLIST_PROVIDER ? 'merged:' : (provider === 'qq' ? 'qq:' : (provider === 'kugou' ? 'kugou:' : (provider === 'qishui' ? 'qishui:' : '')))) + pl.id, provider: provider
+          cover: pl.cover || '', tag: provider === MERGED_PLAYLIST_PROVIDER ? '跨平台歌单' : ((pl.shelfPane || pl.shelf_pane) === 'fav' || (!(pl.shelfPane || pl.shelf_pane) && pl.subscribed) ? '收藏歌单' : (provider === 'qishui' ? '汽水歌单' : '我的歌单')), playlistId: (provider === MERGED_PLAYLIST_PROVIDER ? 'merged:' : (provider === 'qq' ? 'qq:' : (provider === 'kugou' ? 'kugou:' : (provider === 'qishui' ? 'qishui:' : '')))) + pl.id, provider: provider,
+          subscribed: !!pl.subscribed, specialType: Number(pl.specialType || 0), virtual: !!pl.virtual
         };
       });
       if (shelfShowsPodcasts() && (shelfPane === 'mine' || shelfMergesCollections()) && myPodcastCollections.length) {
@@ -121,7 +135,8 @@ function makeShelfManager() {
       item.type || '', item.title || '', item.sub || '', item.tag || '',
       item.playlistId || '', item.podcastKey || '', item.queueIndex == null ? '' : item.queueIndex,
       item.cover || '', coverState, card && card.isCenter ? 1 : 0, card && card.selected ? 1 : 0,
-      card && card.dofBucket == null ? -1 : card.dofBucket, pulseBucket, shelfAccentHex(), shelfSettings().bgOpacity
+      card && card.dofBucket == null ? -1 : card.dofBucket, pulseBucket, shelfAccentHex(), shelfSettings().bgOpacity,
+      card && card.isCenter && item.type === 'playlist' && shelfPlaylistCanDelete(item) ? 1 : 0
     ].join('|');
   }
 
@@ -224,6 +239,18 @@ function makeShelfManager() {
         ctx.font = '700 14px Inter, "Microsoft YaHei", Arial';
         ctx.fillStyle = 'rgba(255,255,255,0.78)';
         ctx.fillText('详情', tx + 184, actionY + 24);
+
+        // 删除歌单按钮（仅可删除的自有歌单显示）
+        if (shelfPlaylistCanDelete(item)) {
+          makeRoundRect(ctx, tx + 266, actionY, 70, 38, 18);
+          ctx.fillStyle = 'rgba(255,90,70,0.08)'; ctx.fill();
+          ctx.strokeStyle = 'rgba(255,120,100,0.32)';
+          ctx.lineWidth = 1.1; ctx.stroke();
+          ctx.font = '700 12.5px Inter, "Microsoft YaHei", Arial';
+          ctx.fillStyle = 'rgba(255,150,130,0.92)';
+          var delText = '删除歌单';
+          ctx.fillText(delText, tx + 266 + (70 - ctx.measureText(delText).width) / 2, actionY + 24);
+        }
       } else if (item.type === 'queue') {
         ctx.font = '600 14px Inter, "Microsoft YaHei", Arial';
         ctx.fillStyle = shelfAccentRgba(0.84);
@@ -389,6 +416,20 @@ function makeShelfManager() {
       connectorParticles = null;
     }
     allItems = currentItems();
+    var kugouDiagnostic = {
+      mode: mode,
+      pane: shelfPane,
+      mergeEnabled: !!(fx && fx.shelfMergeCollections),
+      catalogRows: (userPlaylists || []).length,
+      catalogKugouRows: (userPlaylists || []).filter(function (pl) { return pl && pl.provider === 'kugou'; }).length,
+      shelfItems: allItems.length,
+      shelfKugouItems: allItems.filter(function (item) { return item && item.provider === 'kugou'; }).length
+    };
+    var kugouDiagnosticSig = JSON.stringify(kugouDiagnostic);
+    if (kugouDiagnosticSig !== lastKugouDiagnosticSig) {
+      lastKugouDiagnosticSig = kugouDiagnosticSig;
+      console.log('[KugouPlaylistSync][shelf] rebuilt', kugouDiagnostic);
+    }
     lastSig = sig(allItems);
     lastCardRedrawAt = -10;
     lastCardPulseBucket = -1;

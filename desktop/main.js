@@ -22,7 +22,8 @@ const {
   LOGIN_EASTER_EGG_GATE_VERSION,
   LOGIN_EASTER_EGG_STATE_FILE,
 } = require('./login-easter-egg-gate');
-const { extractKugouAuth } = require('../kugou-api');
+const { extractKugouAuth, validateKugouPlaylistSession } = require('../kugou-api');
+const { createKugouLoginSessionGate } = require('./kugou-login-session');
 const { qishuiCookieHasLogin } = require('../qishui-api');
 const {
   getSpotifyOAuthConfig,
@@ -131,6 +132,23 @@ const NETEASE_LOGIN_URL = 'https://music.163.com/#/login';
 const QQ_LOGIN_PARTITION = 'persist:mineradio-qqmusic-login';
 const QQ_LOGIN_URL = 'https://y.qq.com/n/ryqq/profile';
 const QQ_LOGIN_FALLBACK_URL = 'https://y.qq.com/';
+// 登录窗口加载 y.qq.com 失败（网络被重置/SSL 错误）时展示的提示页，引导检查
+// 网络或改用浏览器登录后手动粘贴 Cookie。
+const QQ_LOGIN_NETWORK_HINT_HTML =
+  '<!doctype html><html><head><meta charset="utf-8"><style>' +
+  'body{background:#151515;color:#eee;font-family:"Microsoft YaHei",Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}' +
+  '.box{max-width:560px;padding:28px;border:1px solid #3a3a3a;border-radius:12px;background:#1d1d1d;line-height:1.9}' +
+  'h2{color:#ff8a65;margin-top:0}.sub{color:#aaa;font-size:13px}' +
+  '</style></head><body><div class="box">' +
+  '<h2>无法连接 QQ 音乐官网</h2>' +
+  '<p>登录窗口加载 y.qq.com 失败（网络连接被重置 / SSL 错误）。这通常是网络、代理或安全软件拦截导致，与应用本身无关。</p>' +
+  '<p>请检查：</p>' +
+  '<p>1) 浏览器能否打开 <b>https://y.qq.com</b>；<br>' +
+  '2) 代理 / VPN / 防火墙 / 安全软件是否拦截了 y.qq.com；<br>' +
+  '3) 网络连接是否正常。</p>' +
+  '<p>替代方案：在能打开 y.qq.com 的浏览器中登录 QQ 音乐后，回到本应用选择<b>“手动粘贴 Cookie”</b>导入即可完成登录。</p>' +
+  '<p class="sub">本窗口可关闭，不影响应用其他功能。</p>' +
+  '</div></body></html>';
 const KUGOU_LOGIN_PARTITION = 'persist:mineradio-kugou-login';
 const KUGOU_LOGIN_URL = 'https://www.kugou.com/';
 const KUGOU_LOGIN_WARMUP_URL = 'https://www.kugou.com/newuc/user/uc/type=edit';
@@ -2635,7 +2653,16 @@ async function openQQMusicLoginWindow(owner, options) {
           try { await cookieSession.clearCache(); } catch (_) {}
         }
         console.warn('QQ profile login entry failed, retrying official homepage:', message);
-        await loginWindow.loadURL(QQ_LOGIN_FALLBACK_URL);
+        try {
+          await loginWindow.loadURL(QQ_LOGIN_FALLBACK_URL);
+        } catch (secondError) {
+          console.warn('QQ official homepage failed too, showing network hint:', String(secondError && secondError.message || secondError || ''));
+          // 官网主页也加载失败（网络/SSL 被拦截）：显示窗口并展示可操作提示
+          showLoginWindow();
+          try {
+            await loginWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(QQ_LOGIN_NETWORK_HINT_HTML));
+          } catch (_) {}
+        }
       }
     };
 
@@ -2750,6 +2777,21 @@ async function openQQMusicLoginWindow(owner, options) {
       `, true).catch(() => {});
     });
 
+    // 主 frame 加载失败（loadURL 有时不 reject 但页面失败）：
+    // 若尚未登录成功且 URL 属 QQ 音乐域，显示网络提示页，避免白屏无反馈。
+    // ERR_ABORTED(-3) 表示导航被取消（如点击登录跳转 qq.com 域），非网络错误，跳过。
+    loginWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (settled || !isMainFrame || errorCode === -3) return;
+      const failedUrl = String(validatedURL || '');
+      if (!/y\.qq\.com|qq\.com/i.test(failedUrl)) return;
+      let failedHost = 'qq.com';
+      try { failedHost = new URL(failedUrl).hostname || failedHost; } catch (_) {}
+      console.warn('QQ login did-fail-load:', errorCode, errorDescription, failedHost);
+      showLoginWindow();
+      loginWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(QQ_LOGIN_NETWORK_HINT_HTML))
+        .catch(() => {});
+    });
+
     loginWindow.on('ready-to-show', showLoginWindow);
     loginWindow.on('closed', async () => {
       if (settled) return;
@@ -2781,8 +2823,40 @@ async function clearQQMusicLoginSession() {
 
 async function openKugouMusicLoginWindow(owner) {
   const cookieSession = session.fromPartition(KUGOU_LOGIN_PARTITION);
+  const kugouSessionGate = createKugouLoginSessionGate({
+    hasLogin: kugouCookieHasLogin,
+    hasPlayback: kugouCookieHasPlayback,
+    validateSession: validateKugouPlaylistSession,
+  });
+  const logSessionInspection = (stage, inspection) => {
+    if (!inspection || inspection.duplicate) return;
+    console.log('[KugouPlaylistSync][login] session-validation', {
+      stage,
+      identityPresent: !!inspection.identityPresent,
+      playbackFieldsPresent: !!inspection.playbackFieldsPresent,
+      attempted: !!inspection.attempted,
+      validated: !!inspection.validated,
+      reauthRequired: !!inspection.reauthRequired,
+      providerErrorCode: Number(inspection.providerErrorCode) || 0,
+    });
+  };
   const initialCookie = await readKugouLoginCookieHeader(cookieSession);
-  if (kugouCookieHasPlayback(initialCookie)) return { ok: true, cookie: initialCookie, reused: true };
+  const initialInspection = await kugouSessionGate.inspect(initialCookie);
+  logSessionInspection('initial', initialInspection);
+  if (initialInspection.validated) {
+    console.log('[KugouPlaylistSync][login] completed', { reused: true, validated: true });
+    return { ok: true, cookie: initialCookie, reused: true };
+  }
+  if (initialInspection.reauthRequired) {
+    await cookieSession.clearStorageData({
+      storages: ['cookies', 'localstorage', 'indexdb', 'cachestorage'],
+    });
+    kugouSessionGate.reset();
+    console.warn('[KugouPlaylistSync][login] stale-session-cleared', {
+      providerErrorCode: initialInspection.providerErrorCode,
+      reauthRequired: true,
+    });
+  }
 
   return new Promise((resolve) => {
     let settled = false;
@@ -2820,9 +2894,12 @@ async function openKugouMusicLoginWindow(owner) {
     const checkCookies = async () => {
       try {
         const cookie = await readKugouLoginCookieHeader(cookieSession);
-        if (kugouCookieHasPlayback(cookie)) {
+        const inspection = await kugouSessionGate.inspect(cookie);
+        logSessionInspection('poll', inspection);
+        if (inspection.validated && kugouSessionGate.isValidated(cookie)) {
+          console.log('[KugouPlaylistSync][login] completed', { reused: false, validated: true });
           finish({ ok: true, cookie });
-        } else if (kugouCookieHasLogin(cookie) && !warmupStarted) {
+        } else if (inspection.identityPresent && !inspection.playbackFieldsPresent && !warmupStarted) {
           warmupStarted = true;
           setTimeout(() => {
             if (!settled && loginWindow && !loginWindow.isDestroyed()) {
@@ -2863,16 +2940,30 @@ async function openKugouMusicLoginWindow(owner) {
     loginWindow.on('ready-to-show', () => loginWindow.show());
     loginWindow.on('closed', async () => {
       if (settled) return;
+      settled = true;
+      kugouSessionGate.reset();
       if (pollTimer) clearInterval(pollTimer);
       try {
         const cookie = await readKugouLoginCookieHeader(cookieSession);
-        resolve(kugouCookieHasPlayback(cookie)
-          ? { ok: true, cookie }
-          : (kugouCookieHasLogin(cookie)
-            ? { ok: true, cookie, partial: true, message: '酷狗账号已登录，但播放 token 不完整，请稍后在播放器内重试登录' }
-            : { ok: false, cancelled: true, message: '酷狗登录窗口已关闭' }));
+        if (kugouSessionGate.isValidated(cookie)) {
+          resolve({ ok: true, cookie });
+          return;
+        }
+        console.warn('[KugouPlaylistSync][login] closed-before-validation', {
+          identityPresent: kugouCookieHasLogin(cookie),
+          playbackFieldsPresent: kugouCookieHasPlayback(cookie),
+        });
+        resolve({
+          ok: false,
+          error: 'KUGOU_PLAYLIST_SESSION_NOT_VALIDATED',
+          message: '酷狗登录未通过歌单同步验证，请重新登录',
+        });
       } catch (e) {
-        resolve({ ok: false, error: e.message || '酷狗登录窗口已关闭' });
+        resolve({
+          ok: false,
+          error: 'KUGOU_PLAYLIST_SESSION_NOT_VALIDATED',
+          message: '酷狗登录未通过歌单同步验证，请重新登录',
+        });
       }
     });
 

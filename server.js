@@ -38,6 +38,7 @@ const {
   playlist_tracks,
   playlist_track_add,
   playlist_create,
+  playlist_delete,
   playlist_detail,
   playlist_track_all,
   personalized,
@@ -65,6 +66,10 @@ const { fileURLToPath } = require('url');
 const { analyzePodcastDjStream, analyzePodcastDjIntro } = require('./dj-analyzer');
 const { TrackDecryptor } = require('./qishui-audio-decryptor/track-decryptor');
 const {
+  createBoundedTtlCache,
+  createByteBoundedCache,
+} = require('./server/runtime-bounded-cache');
+const {
   normalizeQQVipPayload: normalizeQQVipPayloadStrict,
   resolveQQVipFromProbes,
   qqVipSessionCacheKey,
@@ -85,6 +90,7 @@ const {
   handleKugouLikeCheck,
   handleKugouLikeToggle,
   handleKugouPlaylistAddSong,
+  handleKugouPlaylistRemoveSong,
   getKugouLoginInfo,
   normalizeKugouCookieInput,
   clearKugouSessionCaches,
@@ -108,6 +114,7 @@ const {
   handleQishuiSetTrackLiked,
   handleQishuiSetPlaylistCollected,
   handleQishuiPlaylistAddSong,
+  handleQishuiPlaylistRemoveSong,
   handleQishuiSetAlbumCollected,
   handleQishuiReportRecentlyPlayed,
   handleQishuiComments,
@@ -131,6 +138,8 @@ const {
   handleSpotifyLibraryCheck,
   handleSpotifyLibrarySet,
   handleSpotifyPlaylistAddSong,
+  handleSpotifyPlaylistRemoveSong,
+  handleSpotifyPlaylistDelete,
   handleSpotifyCreatePlaylist,
   handleSpotifySongUrl,
   handleSpotifyLyric,
@@ -169,9 +178,11 @@ const APP_PACKAGE = readPackageInfo();
 const APP_VERSION = process.env.MINERADIO_VERSION || APP_PACKAGE.version || '2.1.0';
 const UPDATE_CONFIG = readUpdateConfig(APP_PACKAGE);
 const qishuiAudioDecryptor = new TrackDecryptor();
-const qishuiAudioDecryptCache = new Map();
 const QISHUI_AUDIO_DECRYPT_CACHE_MAX_BYTES = 96 * 1024 * 1024;
-let qishuiAudioDecryptCacheBytes = 0;
+const qishuiAudioDecryptCache = createByteBoundedCache({
+  maxBytes: QISHUI_AUDIO_DECRYPT_CACHE_MAX_BYTES,
+  valueBytes: value => value && value.buffer && value.buffer.length || 0,
+});
 const UPDATE_FALLBACK_NOTES = [
   '修复多行歌词与 3D 歌单架的显示层级',
   '优化更新入口与安装包获取流程',
@@ -336,11 +347,18 @@ function readConfiguredCookieFile(file) {
   return '';
 }
 function writeConfiguredCookieFile(file, value) {
+  let tmp = '';
   try {
     if (!file) return;
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, String(value || ''), 'utf8');
-  } catch (_) {}
+    // 原子写：先写临时文件再 rename，避免写文件过程中进程崩溃/断电
+    // 留下 0 字节损坏文件导致登录态丢失。
+    tmp = file + '.tmp-' + process.pid;
+    fs.writeFileSync(tmp, String(value || ''), 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { if (tmp) fs.unlinkSync(tmp); } catch (_) {}
+  }
 }
 const configuredCookieStores = {
   netease: { file: '', value: '', getFile: getCookieFile },
@@ -1072,9 +1090,25 @@ function normalizeQQUin(raw) {
 }
 function qqCookieUin(obj) {
   obj = obj || qqCookieObject();
-  const isWechat = !!obj.wxopenid || Number(obj.login_type) === 2;
+  // 微信判据仅用明确的 wx 前缀字段或 login_type=2；
+  // psrf_qqopenid/unionid 是 QQ 互联 OAuth 标准字段，QQ 号登录也携带，不能作微信判据
+  const isWechat = !!obj.wxopenid || !!obj.wxuin || !!obj.wxskey || !!obj.wxrefresh_token || Number(obj.login_type) === 2;
   const raw = isWechat ? (obj.wxuin || obj.uin || obj.p_uin) : (obj.uin || obj.qqmusic_uin || obj.wxuin || obj.p_uin);
   return normalizeQQUin(raw);
+}
+// QQ 登录会话类型：
+//   qq     = 标准 QQ 网页登录（qqmusic_key/qm_keyst，无 wx 前缀字段）→ 支持红心/歌单写操作
+//   wechat = 微信扫码登录（wxopenid/wxuin/wxskey/wxrefresh_token 或 login_type=2）
+//            → 服务端以 80105 拒绝写操作，仅可读
+//   oauth  = 纯 OAuth 授权登录（仅 psrf_qqaccess_token，无 qqmusic_key）→ 同样仅可读
+//   none   = 无有效会话
+function qqLoginSessionType(obj) {
+  obj = obj || qqCookieObject();
+  if (!obj || !qqCookieUin(obj)) return 'none';
+  if (!!obj.wxopenid || !!obj.wxuin || !!obj.wxskey || !!obj.wxrefresh_token || Number(obj.login_type) === 2) return 'wechat';
+  if (!!(obj.qm_keyst || obj.qqmusic_key || obj.music_key)) return 'qq';
+  if (!!obj.psrf_qqaccess_token) return 'oauth';
+  return 'none';
 }
 function qqCookieMusicKey(obj) {
   obj = obj || qqCookieObject();
@@ -1336,7 +1370,7 @@ const QQ_LIKED_DIRID = 201;
 const QQ_LIKED_PLAYLIST_NAME = 'QQ 音乐·我的喜欢';
 const QQ_LIKED_PLAYLIST_COVER = 'https://y.gtimg.cn/mediastyle/global/img/cover_like.png';
 const QQ_LIKED_AUTH_MESSAGE = 'QQ 音乐“我的喜欢”需要完整 QQ 音乐授权。请重新打开官方 QQ 音乐登录窗口，等待进入播放器页后再关闭。';
-const qqLikedPlaylistCoverByUser = new Map();
+const qqLikedPlaylistCoverByUser = createBoundedTtlCache({ maxEntries: 256 });
 
 function qqLikedPlaylistUserKey(info) {
   return String(info && (info.userId || info.uin) || '').trim();
@@ -1427,7 +1461,7 @@ async function handleSearch(keywords, limit, offset) {
 const NETEASE_SOURCE_MATCH_POSITIVE_TTL_MS = 12 * 60 * 60 * 1000;
 const NETEASE_SOURCE_MATCH_NEGATIVE_TTL_MS = 5 * 60 * 1000;
 const NETEASE_SOURCE_MATCH_MAX_CANDIDATES = 4;
-const neteaseSourceMatchCache = new Map();
+const neteaseSourceMatchCache = createBoundedTtlCache({ maxEntries: 256 });
 
 function neteaseSourceMatchText(value) {
   return String(value || '').normalize('NFKC').toLowerCase()
@@ -1550,16 +1584,12 @@ function neteaseSourceMatchCacheKey(id, hints) {
 function readNeteaseSourceMatchCache(key) {
   const entry = neteaseSourceMatchCache.get(key);
   if (!entry) return null;
-  const ttl = entry.candidates && entry.candidates.length ? NETEASE_SOURCE_MATCH_POSITIVE_TTL_MS : NETEASE_SOURCE_MATCH_NEGATIVE_TTL_MS;
-  if (Date.now() - entry.at > ttl) {
-    neteaseSourceMatchCache.delete(key);
-    return null;
-  }
   return entry.candidates;
 }
 function writeNeteaseSourceMatchCache(key, candidates) {
-  neteaseSourceMatchCache.set(key, { at: Date.now(), candidates: candidates || [] });
-  while (neteaseSourceMatchCache.size > 256) neteaseSourceMatchCache.delete(neteaseSourceMatchCache.keys().next().value);
+  const normalized = candidates || [];
+  const ttlMs = normalized.length ? NETEASE_SOURCE_MATCH_POSITIVE_TTL_MS : NETEASE_SOURCE_MATCH_NEGATIVE_TTL_MS;
+  neteaseSourceMatchCache.set(key, { at: Date.now(), candidates: normalized }, ttlMs);
 }
 function neteaseSourceMatchHintArtists(hints) {
   hints = hints || {};
@@ -1808,7 +1838,7 @@ const QQ_HEADERS = {
   'User-Agent': UA,
 };
 const QQ_VIP_INFO_CACHE_TTL_MS = 2 * 60 * 1000;
-const qqVipInfoCache = new Map();
+const qqVipInfoCache = createBoundedTtlCache({ maxEntries: 256 });
 
 function requestText(targetUrl, opts, body) {
   opts = opts || {};
@@ -2589,7 +2619,8 @@ async function qqMusicRequest(payload, opts) {
     'Content-Type': 'application/json;charset=UTF-8',
     'Content-Length': Buffer.byteLength(body),
   };
-  if (opts.cookie && qqCookie) headers.Cookie = qqCookie;
+  // opts.cookie: true = 完整会话 cookie;字符串 = 自定义 cookie;false/空 = 不带 cookie
+  if (opts.cookie) headers.Cookie = typeof opts.cookie === 'string' ? opts.cookie : qqCookie;
   const text = await requestText(QQ_MUSICU_URL, {
     method: 'POST',
     headers,
@@ -2810,6 +2841,7 @@ function normalizeQQProfile(body, cookieObj) {
     expiresAt: Number(profileVip.expiresAt) || 0,
     hasCookie: !!qqCookie,
     playbackKeyReady: !!qqCookiePlaybackKey(cookieObj),
+    loginType: qqLoginSessionType(cookieObj),
     profileSource: profileNick || profileAvatar ? 'qq-profile' : (cookieNick || avatar ? 'cookie' : 'fallback'),
     vipSource: profileVip.resolved ? 'qq-profile-vip' : 'profile',
   };
@@ -2821,7 +2853,19 @@ async function getQQLoginInfo(options) {
   const cookieObj = qqCookieObject();
   const uin = qqCookieUin(cookieObj);
   const musicKey = qqCookieMusicKey(cookieObj);
-  if (!uin || !musicKey) return { provider: 'qq', loggedIn: false, hasCookie: !!qqCookie };
+  if (!uin || !musicKey) {
+    // 登录未建立时的诊断信息：cookie 缺什么、是否带微信/OAuth 特征，
+    // 供前端状态区给出"请用 QQ 号扫码登录"的可操作提示。
+    const cookieState = {
+      hasFile: !!qqCookie,
+      hasUin: !!qqCookieUin(cookieObj),
+      hasMusicKey: !!qqCookieMusicKey(cookieObj),
+      hasPlaybackKey: !!qqCookiePlaybackKey(cookieObj),
+      wechatHints: !!(cookieObj && (cookieObj.wxopenid || cookieObj.wxuin || cookieObj.wxskey || cookieObj.wxrefresh_token || Number(cookieObj.login_type) === 2)),
+      oauthHints: !!(cookieObj && (cookieObj.psrf_qqopenid || cookieObj.psrf_qqunionid)),
+    };
+    return { provider: 'qq', loggedIn: false, hasCookie: !!qqCookie, loginType: qqLoginSessionType(cookieObj), cookieState };
+  }
   const fallback = normalizeQQProfile(null, cookieObj);
   const vipProbePromise = fetchQQVipStatus(cookieObj, { force: !!options.forceVip }).catch(e => {
     if (options.forceVip) console.warn('[QQLogin] VIP probe skipped:', e.message);
@@ -2900,14 +2944,7 @@ function qishuiAudioCacheKey(cleanUrl, auth) {
 
 function rememberQishuiDecryptedAudio(key, payload) {
   if (!payload || !Buffer.isBuffer(payload.buffer)) return;
-  qishuiAudioDecryptCache.set(key, Object.assign({ at: Date.now() }, payload));
-  qishuiAudioDecryptCacheBytes += payload.buffer.length;
-  while (qishuiAudioDecryptCacheBytes > QISHUI_AUDIO_DECRYPT_CACHE_MAX_BYTES && qishuiAudioDecryptCache.size > 1) {
-    const oldest = [...qishuiAudioDecryptCache.entries()].sort((a, b) => (a[1].at || 0) - (b[1].at || 0))[0];
-    if (!oldest) break;
-    qishuiAudioDecryptCache.delete(oldest[0]);
-    qishuiAudioDecryptCacheBytes -= oldest[1].buffer.length;
-  }
+  qishuiAudioDecryptCache.set(key, payload);
 }
 
 async function getQishuiDecryptedAudio(audioUrl) {
@@ -3285,6 +3322,207 @@ async function handleQQPlaylistTracks(id, opts) {
     partial: !!pageLimit,
     total,
   };
+}
+
+// ---------- QQ 音乐账号写操作（musicu.fcg，经 L-1124/QQMusicApi 验证） ----------
+
+// QQ 写操作前置会话校验，三个写实现（歌单歌曲写、创建歌单、删除歌单）共用：
+// 微信扫码登录(login_type=2/wxopenid)仅可读、OAuth/无 musickey 不可写，
+// 提前拦截并给出可操作提示，避免“提示成功但没写入”或落到 500。
+function assertQQWriteSessionSupported() {
+  if (qqLoginSessionType() === 'wechat') {
+    throw new Error('QQ_WECHAT_WRITE_UNSUPPORTED:微信登录仅支持播放与读取，QQ 音乐写操作（红心/歌单）请改用 QQ 号扫码登录');
+  }
+  if (!qqCookiePlaybackKey()) {
+    throw new Error('QQ_MUSICKEY_REQUIRED:QQ 音乐写操作需要网页版授权（含 qqmusic_key），请点击重新授权打开官方窗口登录');
+  }
+}
+// 写操作被服务端拒绝(403/80105)时只记录非敏感诊断摘要，不输出账号标识、票据值或响应正文。
+function logQQWriteRejected(code, variant) {
+  try {
+    const obj = qqCookieObject() || {};
+    const keys = Object.keys(obj).sort();
+    const loginHints = ['login_type', 'pt_login_type', 'tmeLoginType', 'pt_oauth_token']
+      .filter((k) => obj[k] != null)
+      .join(',');
+    console.warn('[QQWrite] rejected code=' + code + ' sessionType=' + qqLoginSessionType() +
+      ' variant=' + (variant || 'full') +
+      ' loginHints=[' + loginHints + '] cookieFields=[' + keys.join(',') + ']');
+  } catch (_) {}
+}
+// 写操作 cookie 变体：
+//   full = 完整会话 cookie（含 psrf_qqopenid/tmeLoginType 等 QQ 互联 OAuth 字段）
+//   slim = 仅票据字段（uin/musickey/p_skey 等），剔除可能触发“OAuth 会话”判定的字段
+//   none = 不带 cookie，仅凭 comm.uin + g_tk(musickey 哈希) 验证
+// 某些 QQ 互联 OAuth 会话会被写接口以 80105 拒绝，精简/无 cookie 可绕开该限制。
+function qqWriteCookieVariants() {
+  const full = String(qqCookie || '');
+  const keep = new Set(['uin', 'qqmusic_uin', 'qm_keyst', 'qqmusic_key', 'music_key', 'wxskey', 'p_skey', 'skey', 'wxuin', 'p_uin', 'pt4_token', 'pt2gguin']);
+  const slim = full.split(';').map((s) => s.trim()).filter((s) => {
+    const eq = s.indexOf('=');
+    return eq > 0 && keep.has(s.slice(0, eq).trim());
+  }).join('; ');
+  return { full, slim, none: '' };
+}
+// 依次用 full → slim → none 三种 cookie 变体发送 musicu.fcg 写请求：
+// - 会话级拒绝(403/80105)继续尝试下一变体（同一请求仅 cookie 不同，无重复副作用）；
+// - 网络层错误(超时/连接失败)仅对幂等写(idempotent=true)继续重试，
+//   非幂等写(创建/删除歌单)直接抛错，避免"超时后重发导致重复创建"。
+async function qqWriteWithVariants(buildPayload, opts) {
+  opts = opts || {};
+  const variants = qqWriteCookieVariants();
+  const order = [['full', variants.full], ['slim', variants.slim], ['none', variants.none]];
+  let lastError = null;
+  let lastResult = null;
+  for (const [name, cookieText] of order) {
+    try {
+      const body = await qqMusicRequest(buildPayload(), { cookie: cookieText || false, timeoutMs: 10000 });
+      const block = body && body.req_0;
+      const data = block && block.data || {};
+      const qqNum = function (x) { const n = Number(x); return Number.isFinite(n) ? n : 0; };
+      const code = qqNum(body && body.code) || qqNum(block && block.code) || qqNum(data && data.retCode);
+      lastResult = { code, body, data, variant: name };
+      // 会话级拒绝：可能是 cookie 中 QQ 互联 OAuth 字段导致，换精简/无 cookie 重试
+      if (code === 403 || code === 80105) continue;
+      return lastResult;
+    } catch (err) {
+      if (opts.idempotent !== true) throw err;
+      lastError = err;
+    }
+  }
+  if (lastResult) return lastResult;
+  throw lastError || new Error('QQ_WRITE_REQUEST_FAILED');
+}
+// 写请求的统一 comm（WEB 平台，与 L-1124/QQMusicApi 逐字段一致）
+function qqWriteComm(uin) {
+  const gtk = qqMusicGtk(qqCookie);
+  return { ct: 24, cv: 4747474, platform: 'yqq.json', chid: '0', uin, g_tk: gtk, g_tk_new_20200303: gtk, format: 'json', inCharset: 'utf-8', outCharset: 'utf-8', notice: 0, need_new_code: 1 };
+}
+
+// musicu.fcg 歌单歌曲写操作公共实现：AddSonglist / DelSonglist。
+// 歌曲用数字 songId（歌曲对象 qqId），dirId 为数字歌单 id；uin 在 comm 里。
+async function qqMusicSonglistWrite(dirId, songs, isDelete) {
+  const uin = qqCookieUin();
+  if (!uin) throw new Error('QQ_LOGIN_REQUIRED');
+  assertQQWriteSessionSupported();
+  const v_songInfo = (Array.isArray(songs) ? songs : [songs]).map(function (s) {
+    return {
+      songId: Number(s && (s.qqId || s.songid || s.id)) || 0,
+      songType: Number(s && s.songType) || 0,
+    };
+  }).filter(function (info) { return info.songId > 0; });
+  if (!v_songInfo.length) throw new Error('Missing QQ song id');
+  const result = await qqWriteWithVariants(function () {
+    return {
+      comm: qqWriteComm(uin),
+      req_0: {
+        module: 'music.musicasset.PlaylistDetailWrite',
+        method: isDelete ? 'DelSonglist' : 'AddSonglist',
+        param: { dirId: Number(dirId) || 0, tid: 0, bFmtUtf8: isDelete ? 1 : true, v_songInfo },
+      },
+    };
+  }, { idempotent: true });
+  const code = result.code;
+  // 80092 = 操作不生效（歌曲已存在/不存在），视为幂等成功
+  if (code === 80092) return { provider: 'qq', loggedIn: true, dirId: String(dirId), success: true, idempotent: true, body: result.body };
+  if (code === 403 || code === 80105) { logQQWriteRejected(code, result.variant); throw new Error('QQ_AUTH_INCOMPLETE:QQ 音乐写操作被当前登录方式拒绝（微信/OAuth 会话仅支持播放与读取），请改用 QQ 号扫码登录'); }
+  if (code !== 0) throw new Error([1000, 301, -100008].includes(code) ? 'QQ_LOGIN_REQUIRED' : ('QQSONGLIST_WRITE_FAILED:' + code));
+  return { provider: 'qq', loggedIn: true, dirId: String(dirId), success: true, body: result.body };
+}
+
+// "我的喜欢"伪歌单(id='liked')→ 数字 dirid(201)
+function normalizeQQDirId(playlistId) {
+  let dirid = String(playlistId || '').trim();
+  if (dirid === QQ_LIKED_PLAYLIST_ID || dirid === 'qq-liked') dirid = String(QQ_LIKED_DIRID);
+  return dirid;
+}
+
+// QQ 红心/取消红心：AddSonglist / DelSonglist 操作"我喜欢"歌单(dirid=201)
+async function handleQQLikeToggle(song, like) {
+  const mid = String(song && (song.qqId || song.songmid || song.mid || song.id) || '').trim();
+  const result = await qqMusicSonglistWrite(QQ_LIKED_DIRID, [song], !like);
+  result.id = mid;
+  result.liked = !!like;
+  return result;
+}
+
+// QQ 喜欢状态批量检查：CgiGetDiss 分页读"我喜欢"构建 liked 集合
+async function handleQQLikeCheck(mids) {
+  const uin = qqCookieUin();
+  if (!uin) return { provider: 'qq', loggedIn: false, liked: {} };
+  const wanted = String(mids || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!wanted.length) return { provider: 'qq', loggedIn: true, liked: {}, total: 0 };
+  const likedSet = new Set();
+  let offset = 0;
+  let hasMore = true;
+  while (hasMore && offset < 4000) {
+    const page = await fetchQQLikedPlaylistPage({ limit: 100, offset });
+    (page.tracks || []).forEach(t => { if (t.mid) likedSet.add(String(t.mid)); });
+    hasMore = !!page.hasMore;
+    offset = page.nextOffset;
+  }
+  const liked = {};
+  wanted.forEach(mid => { liked[mid] = likedSet.has(mid); });
+  return { provider: 'qq', loggedIn: true, liked, total: likedSet.size };
+}
+
+// QQ 收藏歌曲到指定歌单
+async function handleQQPlaylistAddSong(playlistId, song) {
+  const dirid = normalizeQQDirId(playlistId);
+  if (!dirid) throw new Error('Missing QQ playlist id');
+  const result = await qqMusicSonglistWrite(dirid, [song], false);
+  result.pid = dirid;
+  return result;
+}
+
+// QQ 从指定歌单移除歌曲
+async function handleQQPlaylistRemoveSong(playlistId, song) {
+  const dirid = normalizeQQDirId(playlistId);
+  if (!dirid) throw new Error('Missing QQ playlist id');
+  const result = await qqMusicSonglistWrite(dirid, [song], true);
+  result.pid = dirid;
+  return result;
+}
+
+// QQ 创建歌单（musicu.fcg AddPlaylist）
+async function handleQQPlaylistCreate(name) {
+  const uin = qqCookieUin();
+  if (!uin) throw new Error('QQ_LOGIN_REQUIRED');
+  assertQQWriteSessionSupported();
+  name = String(name || '').trim();
+  if (!name) throw new Error('Missing QQ playlist name');
+  const result = await qqWriteWithVariants(function () {
+    return {
+      comm: qqWriteComm(uin),
+      req_0: { module: 'music.musicasset.PlaylistBaseWrite', method: 'AddPlaylist', param: { dirName: name } },
+    };
+  });
+  const code = result.code;
+  const data = result.data;
+  if (code === 403 || code === 80105) { logQQWriteRejected(code, result.variant); throw new Error('QQ_AUTH_INCOMPLETE:QQ 音乐写操作被当前登录方式拒绝（微信/OAuth 会话仅支持播放与读取），请改用 QQ 号扫码登录'); }
+  if (code !== 0) throw new Error([1000, 301, -100008].includes(code) ? 'QQ_LOGIN_REQUIRED' : ('QQCREATE_FAILED:' + code));
+  const dirid = data.dirId || data.dirid;
+  if (dirid == null) throw new Error('QQCREATE_NO_ID');
+  return { provider: 'qq', loggedIn: true, playlist: { id: String(dirid), name }, success: true, body: result.body };
+}
+
+// QQ 删除歌单（musicu.fcg DelPlaylist）
+async function handleQQPlaylistDelete(playlistId) {
+  const uin = qqCookieUin();
+  if (!uin) throw new Error('QQ_LOGIN_REQUIRED');
+  assertQQWriteSessionSupported();
+  const dirid = normalizeQQDirId(playlistId);
+  if (!dirid) throw new Error('Missing QQ playlist id');
+  const result = await qqWriteWithVariants(function () {
+    return {
+      comm: qqWriteComm(uin),
+      req_0: { module: 'music.musicasset.PlaylistBaseWrite', method: 'DelPlaylist', param: { dirId: Number(dirid) || 0 } },
+    };
+  });
+  const code = result.code;
+  if (code === 403 || code === 80105) { logQQWriteRejected(code, result.variant); throw new Error('QQ_AUTH_INCOMPLETE:QQ 音乐写操作被当前登录方式拒绝（微信/OAuth 会话仅支持播放与读取），请改用 QQ 号扫码登录'); }
+  if (code !== 0) throw new Error([1000, 301, -100008].includes(code) ? 'QQ_LOGIN_REQUIRED' : ('QQDELETE_FAILED:' + code));
+  return { provider: 'qq', loggedIn: true, id: dirid, success: true, body: result.body };
 }
 
 function qqAlbumCover(albumMid, size) {
@@ -3909,15 +4147,18 @@ async function handleQQDailyRecommendations() {
   }
 }
 
-// QQ musicu 接口的 g_tk 需要与 cookie 中的 skey 一致（hash33），
-// 否则即使携带有效 cookie 也会被判登录态无效（500003/860100005）。
+// QQ musicu 接口的 g_tk 必须基于音乐票据 musickey（qm_keyst/qqmusic_key）计算：
+// 与 L-1124/QQMusicApi 的 hash33(musickey) 一致。写接口(AddSonglist/DelSonglist/
+// AddPlaylist/DelPlaylist)严格校验 g_tk，用 p_skey/skey 计算会被服务端以 80105
+// 拒绝（读取接口不严格，故此前仅写操作失败）。
 function qqMusicGtk(cookieText) {
   const raw = String(cookieText || '');
   const pick = (name) => {
     const match = new RegExp('(?:^|;\\s*)' + name + '=([^;]*)').exec(raw);
-    return match ? decodeURIComponent(match[1] || '') : '';
+    if (!match) return '';
+    try { return decodeURIComponent(match[1] || ''); } catch (_) { return match[1] || ''; }
   };
-  const skey = pick('skey') || pick('p_skey') || pick('qm_keyst') || pick('qqmusic_key') || pick('music_key') || pick('wxskey');
+  const skey = pick('qm_keyst') || pick('qqmusic_key') || pick('music_key') || pick('skey') || pick('p_skey') || pick('wxskey');
   let hash = 5381;
   for (let i = 0; i < skey.length; i += 1) {
     hash += (hash << 5) + skey.charCodeAt(i);
@@ -5596,6 +5837,52 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pn === '/api/spotify/playlist/remove-song') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'spotify', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleSpotifyPlaylistRemoveSong(body.pid || body.playlistId || '', body.song || body));
+    } catch (err) {
+      console.error('[SpotifyPlaylistRemoveSong]', err);
+      sendJSON(res, {
+        provider: 'spotify',
+        success: false,
+        error: err.code || err.message,
+        message: err.code === 'SPOTIFY_WRITE_SCOPE_REQUIRED'
+          ? '请重新连接 Spotify，授予歌单写入权限。'
+          : err.message,
+        missingScopes: err.missingScopes || [],
+      }, Number(err.statusCode) || 500);
+    }
+    return;
+  }
+
+  if (pn === '/api/spotify/playlist/delete') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'spotify', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleSpotifyPlaylistDelete(body.id || body.pid || body.playlistId || ''));
+    } catch (err) {
+      console.error('[SpotifyPlaylistDelete]', err);
+      sendJSON(res, {
+        provider: 'spotify',
+        success: false,
+        error: err.code || err.message,
+        message: err.code === 'SPOTIFY_WRITE_SCOPE_REQUIRED'
+          ? '请重新连接 Spotify，授予歌单写入权限。'
+          : err.message,
+        missingScopes: err.missingScopes || [],
+      }, Number(err.statusCode) || 500);
+    }
+    return;
+  }
+
   if (pn === '/api/spotify/playlist/create') {
     try {
       if (req.method !== 'POST') {
@@ -5974,6 +6261,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pn === '/api/qishui/playlist/remove-song') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qishui', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleQishuiPlaylistRemoveSong(body.pid || body.playlistId || '', body.song || body, qishuiCookie));
+    } catch (err) {
+      console.error('[QishuiPlaylistRemoveSong]', err);
+      sendJSON(res, { provider: 'qishui', success: false, error: err.message }, 500);
+    }
+    return;
+  }
+
   if (pn === '/api/qishui/album/collect') {
     try {
       if (req.method !== 'POST') {
@@ -6190,6 +6492,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pn === '/api/kugou/playlist/remove-song') {
+    try {
+      if (!kugouCookieHasPlayback(kugouCookie)) {
+        sendJSON(res, { provider: 'kugou', success: false, error: 'KUGOU_AUTH_REQUIRED' }, 401);
+        return;
+      }
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'kugou', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const body = await readRequestBody(req);
+      const pid = body.pid || url.searchParams.get('pid') || '';
+      const song = body.song || body;
+      if (!pid) { sendJSON(res, { provider: 'kugou', success: false, error: 'Missing playlist id' }, 400); return; }
+      const result = await handleKugouPlaylistRemoveSong(pid, song, kugouCookie);
+      if (!result || result.success === false) {
+        const status = /AUTH|LOGIN/i.test(String(result && result.error || '')) ? 401 : 409;
+        sendJSON(res, { provider: 'kugou', success: false, pid, error: result && result.error || 'KUGOU_PLAYLIST_REMOVE_FAILED', message: result && (result.message || result.error) || '' }, status);
+        return;
+      }
+      sendJSON(res, result);
+    } catch (err) {
+      console.error('[KugouPlaylistRemoveSong]', err);
+      sendJSON(res, { provider: 'kugou', success: false, error: err.message }, 500);
+    }
+    return;
+  }
+
   if (pn === '/api/qq/song/url') {
     try {
       const mid = url.searchParams.get('mid') || url.searchParams.get('id') || '';
@@ -6225,6 +6555,111 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ---------- 红心/歌单写操作 ----------
+  if (pn === '/api/qq/song/like/check') {
+    try {
+      const mids = url.searchParams.get('ids') || url.searchParams.get('mids') || '';
+      sendJSON(res, await handleQQLikeCheck(mids));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT|PLAYBACK_LOGIN/i.test(String(err.message || '')) ? 401 : 500;
+      console.error('[QQLikeCheck]', err);
+      sendJSON(res, { provider: 'qq', liked: {}, error: err.message }, status);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/song/like') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qq', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const info = await getQQLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { provider: 'qq', success: false, error: 'QQ_LOGIN_REQUIRED' }, 401); return; }
+      const body = await readRequestBody(req);
+      const song = body.song || body;
+      const like = String(body.like != null ? body.like : 'true') !== 'false';
+      sendJSON(res, await handleQQLikeToggle(song, like));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT/i.test(String(err.message || '')) ? 401 : (/NOT_IN_LIKED|NOT_IN_PLAYLIST/i.test(String(err.message || '')) ? 409 : 500);
+      console.error('[QQLike]', err);
+      sendJSON(res, { provider: 'qq', success: false, error: err.message }, status);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/playlist/add-song') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qq', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const info = await getQQLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { provider: 'qq', success: false, error: 'QQ_LOGIN_REQUIRED' }, 401); return; }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleQQPlaylistAddSong(body.pid || body.playlistId || '', body.song || body));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT/i.test(String(err.message || '')) ? 401 : 500;
+      console.error('[QQPlaylistAddSong]', err);
+      sendJSON(res, { provider: 'qq', success: false, error: err.message }, status);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/playlist/remove-song') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qq', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const info = await getQQLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { provider: 'qq', success: false, error: 'QQ_LOGIN_REQUIRED' }, 401); return; }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleQQPlaylistRemoveSong(body.pid || body.playlistId || '', body.song || body));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT/i.test(String(err.message || '')) ? 401 : (err.message && /NOT_IN_PLAYLIST/.test(String(err.message)) ? 409 : 500);
+      console.error('[QQPlaylistRemoveSong]', err);
+      sendJSON(res, { provider: 'qq', success: false, error: err.message }, status);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/playlist/create') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qq', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const info = await getQQLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { provider: 'qq', success: false, error: 'QQ_LOGIN_REQUIRED' }, 401); return; }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleQQPlaylistCreate(body.name || ''));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT/i.test(String(err.message || '')) ? 401 : (/已存在|EXISTS/i.test(String(err.message || '')) ? 409 : 500);
+      console.error('[QQPlaylistCreate]', err);
+      sendJSON(res, { provider: 'qq', success: false, error: err.message }, status);
+    }
+    return;
+  }
+
+  if (pn === '/api/qq/playlist/delete') {
+    try {
+      if (req.method !== 'POST') {
+        sendJSON(res, { provider: 'qq', success: false, error: 'METHOD_NOT_ALLOWED' }, 405);
+        return;
+      }
+      const info = await getQQLoginInfo();
+      if (!info.loggedIn) { sendJSON(res, { provider: 'qq', success: false, error: 'QQ_LOGIN_REQUIRED' }, 401); return; }
+      const body = await readRequestBody(req);
+      sendJSON(res, await handleQQPlaylistDelete(body.id || body.pid || body.playlistId || ''));
+    } catch (err) {
+      const status = /LOGIN_REQUIRED|AUTH_INCOMPLETE|MUSICKEY|WECHAT/i.test(String(err.message || '')) ? 401 : 500;
+      console.error('[QQPlaylistDelete]', err);
+      sendJSON(res, { provider: 'qq', success: false, error: err.message }, status);
+    }
+    return;
+  }
+
   // ---------- 歌曲URL ----------
   if (pn === '/api/qq/login/status') {
     try {
@@ -6244,16 +6679,23 @@ const server = http.createServer(async (req, res) => {
       const raw = body.cookie || body.data || body.text || '';
       const normalized = normalizeQQCookieInput(raw);
       const obj = parseCookieString(normalized);
-      if (!qqCookieUin(obj) || !qqCookiePlaybackKey(obj)) {
-        const hasWebSession = !!(qqCookieUin(obj) && qqCookieMusicKey(obj));
+      const hasUin = !!qqCookieUin(obj);
+      const hasMusicKey = !!qqCookieMusicKey(obj);
+      const hasPlaybackKey = !!qqCookiePlaybackKey(obj);
+      const wechatHints = !!(obj.wxopenid || obj.wxuin || obj.wxskey || obj.wxrefresh_token || Number(obj.login_type) === 2);
+      if (!hasUin || !hasPlaybackKey) {
+        const missing = [];
+        if (!hasUin) missing.push('QQ 账号标识(uin)');
+        if (!hasPlaybackKey) missing.push('音乐播放票据(qqmusic_key/qm_keyst)');
+        let message = 'Cookie 缺少 ' + missing.join('、') + '。请完整复制 y.qq.com 域下的全部 Cookie（登录后等待进入 QQ 音乐页面再复制）';
+        if (hasMusicKey && !hasPlaybackKey) message = 'Cookie 含旧票据但缺少有效 qqmusic_key/qm_keyst，请重新登录后复制完整 Cookie';
+        if (wechatHints) message += '；检测到微信登录特征，请改用 QQ 号扫码登录';
         sendJSON(res, {
           provider: 'qq',
           loggedIn: false,
-          partial: hasWebSession,
-          error: hasWebSession ? 'QQ_PLAYBACK_AUTH_INCOMPLETE' : 'INVALID_QQ_COOKIE',
-          message: hasWebSession
-            ? 'QQ 账号验证已完成，但 QQ 音乐播放授权尚未生成，请重新打开官方登录窗口完成授权'
-            : 'QQ cookie 缺少 uin 或有效 QQ 音乐播放票据',
+          partial: hasMusicKey && !hasPlaybackKey,
+          error: hasMusicKey && !hasPlaybackKey ? 'QQ_PLAYBACK_AUTH_INCOMPLETE' : 'INVALID_QQ_COOKIE',
+          message,
         }, 400);
         return;
       }
@@ -6878,6 +7320,58 @@ const server = http.createServer(async (req, res) => {
       sendJSON(res, { loggedIn: true, pid, id, success: true, code: finalCode, body: finalBody, attempts });
     } catch (err) {
       console.error('[PlaylistAddSong]', err);
+      sendJSON(res, { error: err.message }, 500);
+    }
+    return;
+  }
+
+  // ---------- 从歌单移除歌曲 ----------
+  if (pn === '/api/playlist/remove-song') {
+    try {
+      const info = await requireLogin(res);
+      if (!info) return;
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const pid = body.pid || url.searchParams.get('pid');
+      const id = body.id || body.ids || url.searchParams.get('id') || url.searchParams.get('ids');
+      if (!pid || !id) { sendJSON(res, { error: 'Missing playlist id or song id' }, 400); return; }
+      const r = await playlist_tracks({ op: 'del', pid, tracks: String(id), cookie: userCookie, timestamp: Date.now() });
+      const code = normalizeApiCode(r);
+      const message = normalizeApiMessage(r);
+      const bodyOut = r.body || r;
+      const success = code === 200 && !(bodyOut && bodyOut.error);
+      if (!success) {
+        sendJSON(res, { loggedIn: true, pid, id, success: false, code, error: message || 'PLAYLIST_REMOVE_FAILED' }, code === 401 ? 401 : 409);
+        return;
+      }
+      invalidateNeteasePlaylistTrackIndex(pid);
+      sendJSON(res, { loggedIn: true, pid, id, success: true, code, body: bodyOut });
+    } catch (err) {
+      console.error('[PlaylistRemoveSong]', err);
+      sendJSON(res, { error: err.message }, 500);
+    }
+    return;
+  }
+
+  // ---------- 删除歌单 ----------
+  if (pn === '/api/playlist/delete') {
+    try {
+      const info = await requireLogin(res);
+      if (!info) return;
+      const body = req.method === 'POST' ? await readRequestBody(req) : {};
+      const id = body.id || body.pid || url.searchParams.get('id') || url.searchParams.get('pid');
+      if (!id) { sendJSON(res, { error: 'Missing playlist id' }, 400); return; }
+      const r = await playlist_delete({ id, cookie: userCookie, timestamp: Date.now() });
+      const code = normalizeApiCode(r);
+      const bodyOut = r.body || r;
+      const success = code === 200 && !(bodyOut && bodyOut.error);
+      if (!success) {
+        sendJSON(res, { loggedIn: true, id, success: false, code, error: normalizeApiMessage(r) || 'PLAYLIST_DELETE_FAILED' }, code === 401 ? 401 : 409);
+        return;
+      }
+      invalidateNeteasePlaylistTrackIndex(id);
+      sendJSON(res, { loggedIn: true, id, success: true, code, body: bodyOut });
+    } catch (err) {
+      console.error('[PlaylistDelete]', err);
       sendJSON(res, { error: err.message }, 500);
     }
     return;

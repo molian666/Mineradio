@@ -1451,6 +1451,63 @@ async function handleSpotifyPlaylistAddSong(playlistId, song) {
   };
 }
 
+async function handleSpotifyPlaylistRemoveSong(playlistId, song) {
+  const tokenScopes = normalizeScopes(readStoredSpotifyToken().scope);
+  if (!tokenScopes.includes('playlist-modify-private') && !tokenScopes.includes('playlist-modify-public')) {
+    requireSpotifyScopes(['playlist-modify-private']);
+  }
+  playlistId = normalizeText(playlistId).replace(/^spotify:/i, '');
+  const uri = spotifyLibraryUri('track', song);
+  if (!playlistId || !uri) {
+    const err = new Error('SPOTIFY_PLAYLIST_OR_TRACK_REQUIRED');
+    err.code = 'SPOTIFY_PLAYLIST_OR_TRACK_REQUIRED';
+    throw err;
+  }
+  const result = await spotifyUserRequest(
+    '/playlists/' + encodeURIComponent(playlistId) + '/tracks',
+    'DELETE',
+    {},
+    { tracks: [{ uri }] },
+    { timeoutMs: 10000 }
+  );
+  return {
+    provider: 'spotify',
+    loggedIn: true,
+    pid: playlistId,
+    id: uri.split(':').pop(),
+    uri,
+    snapshotId: normalizeText(result && result.snapshot_id),
+    success: true,
+  };
+}
+
+// 删除歌单 = 取消关注（unfollow）自有歌单，Spotify Web API 无"删除"语义。
+async function handleSpotifyPlaylistDelete(playlistId) {
+  const tokenScopes = normalizeScopes(readStoredSpotifyToken().scope);
+  if (!tokenScopes.includes('playlist-modify-private') && !tokenScopes.includes('playlist-modify-public')) {
+    requireSpotifyScopes(['playlist-modify-private']);
+  }
+  playlistId = normalizeText(playlistId).replace(/^spotify:/i, '');
+  if (!playlistId) {
+    const err = new Error('SPOTIFY_PLAYLIST_ID_REQUIRED');
+    err.code = 'SPOTIFY_PLAYLIST_ID_REQUIRED';
+    throw err;
+  }
+  await spotifyUserRequest(
+    '/playlists/' + encodeURIComponent(playlistId) + '/followers',
+    'DELETE',
+    {},
+    null,
+    { timeoutMs: 10000 }
+  );
+  return {
+    provider: 'spotify',
+    loggedIn: true,
+    id: playlistId,
+    success: true,
+  };
+}
+
 async function handleSpotifyCreatePlaylist(name, opts) {
   opts = opts || {};
   name = normalizeText(name);
@@ -1536,6 +1593,8 @@ module.exports = {
   handleSpotifyLibraryCheck,
   handleSpotifyLibrarySet,
   handleSpotifyPlaylistAddSong,
+  handleSpotifyPlaylistRemoveSong,
+  handleSpotifyPlaylistDelete,
   handleSpotifyCreatePlaylist,
   handleSpotifySongUrl,
   handleSpotifyLyric,

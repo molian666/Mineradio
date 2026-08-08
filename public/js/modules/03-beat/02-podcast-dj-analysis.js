@@ -786,7 +786,8 @@ function smoothPodcastDjMapHandoff(songKey, map, token) {
   showBeatChip('DJ 锁拍完成…');
   var apply = function () {
     if (token !== djBeatMapToken || !djMode.active || djMode.songKey !== songKey) return;
-    djBeatMapCache[songKey] = map;
+    rememberRuntimeCacheEntry(djBeatMapCache, songKey, map, RUNTIME_RENDER_CACHE_LIMITS.djBeatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     currentDjBeatMap = map;
     applyPodcastDjProfileFromMap(map);
     syncPodcastDjMapCursor(audio ? audio.currentTime : 0, true);
@@ -811,4 +812,3 @@ function smoothPodcastDjIntroHandoff(songKey, map, token) {
   };
   scheduleVisualApply(apply, 0, 240);
 }
-

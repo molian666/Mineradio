@@ -286,7 +286,11 @@ async function ensureBeatDiskCacheStatus() {
 }
 
 async function readBeatDiskCache(key) {
-  if (!key || beatMapCache[key]) return beatMapCache[key] || null;
+  var cachedMap = key && beatMapCache[key];
+  if (cachedMap) {
+    touchRuntimeCacheEntry(beatMapCache, key);
+    return cachedMap;
+  }
   var st = await ensureBeatDiskCacheStatus();
   if (!st.enabled) return null;
   try {
@@ -295,7 +299,8 @@ async function readBeatDiskCache(key) {
     if (!r || !r.hit || !r.map) return null;
     var map = unpackLocalBeatMap(r.map);
     if (!map) return null;
-    beatMapCache[key] = map;
+    rememberRuntimeCacheEntry(beatMapCache, key, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     return map;
   } catch (e) {
     console.warn('beat disk cache read failed:', e);
@@ -444,7 +449,8 @@ async function runQueueBeatPrefetch(fromIdx, token, seq, state) {
       song: song
     });
     if (token !== beatMapToken || seq !== beatPrefetchToken || !map) return;
-    beatMapCache[key] = map;
+    rememberRuntimeCacheEntry(beatMapCache, key, map, RUNTIME_RENDER_CACHE_LIMITS.beatMaps,
+      typeof collectProtectedBeatMapKeys === 'function' ? collectProtectedBeatMapKeys() : null);
     writeBeatDiskCache(key, map, song, 'mr');
     console.log('队列节奏预热完成:', song.name || key, map.visualBeatCount || 0);
   } catch (err) {

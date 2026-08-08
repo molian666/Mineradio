@@ -21,9 +21,43 @@ function lyricTranslationTextFromAliases(source) {
   source = source || {};
   return source.tlyric || source.trans || source.translatedLyric || source.translation || source.translated_lyric || '';
 }
+// 歌词身份 = 实际播放平台 + 实际播放歌曲 id。
+// 播放解析完成后（13-playback-start-audio.js）会在 song 上记录 resolvedPlaybackProvider /
+// resolvedNeteaseId（网易云站内换录音）等字段；这里优先使用它们，避免"歌曲平台与歌词平台不符"。
+function lyricProviderForSong(song) {
+  if (!song || typeof song !== 'object') return 'netease';
+  var candidates = [
+    song.resolvedPlaybackProvider,
+    song.playbackProvider,
+    song.audioProvider,
+    song.providerResolved,
+    song.playbackSource
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    var value = String(candidates[i] || '');
+    if (/^(netease|qq|kugou|qishui|spotify)$/.test(value)) return value;
+  }
+  return songProviderKey(song);
+}
+function lyricSongIdForProvider(song, provider) {
+  if (!song || typeof song !== 'object') return '';
+  provider = provider || lyricProviderForSong(song);
+  if (provider === 'qq') return String(song.mid || song.songmid || song.id || '');
+  if (provider === 'kugou') return String(song.hash || song.fileHash || song.audioHash || song.id || '');
+  if (provider === 'qishui') return String(song.id || song.providerSongId || '');
+  if (provider === 'spotify') return String(song.id || song.providerSongId || song.spotifyId || '');
+  // 网易云站内换录音（sourceMatch）后，歌词必须跟随实际播放的录音 id
+  return String(song.resolvedNeteaseId || song.id || '');
+}
+function lyricPlaybackSourceKey(song) {
+  if (!song || typeof song !== 'object') return '';
+  var provider = lyricProviderForSong(song);
+  var id = lyricSongIdForProvider(song, provider);
+  return provider + '|' + String(id || '');
+}
 function lyricEndpointForSong(songOrId) {
   var song = (songOrId && typeof songOrId === 'object') ? songOrId : null;
-  var provider = song ? songProviderKey(song) : 'netease';
+  var provider = song ? lyricProviderForSong(song) : 'netease';
   if (provider === 'qq') {
     var mid = song.mid || song.songmid || song.id || '';
     var qqId = song.qqId || (/^\d+$/.test(String(song.id || '')) ? song.id : '');
@@ -40,16 +74,17 @@ function lyricEndpointForSong(songOrId) {
   if (provider === 'spotify') {
     return '/api/spotify/lyric?id=' + encodeURIComponent(song.id || song.providerSongId || song.spotifyId || '');
   }
-  var songId = song ? song.id : songOrId;
+  var songId = song ? lyricSongIdForProvider(song, 'netease') : songOrId;
   return '/api/lyric?id=' + encodeURIComponent(songId);
 }
 
 function persistentLyricCacheKey(song) {
   song = song || {};
-  var provider = typeof songProviderKey === 'function' ? songProviderKey(song) : (song.source || song.provider || 'netease');
-  var id = song.id || song.mid || song.songmid || song.hash || '';
+  var provider = typeof lyricProviderForSong === 'function' ? lyricProviderForSong(song) : (song.source || song.provider || 'netease');
+  var id = lyricSongIdForProvider(song, provider) || song.id || song.mid || song.songmid || song.hash || '';
   var artist = song.artist || song.singer || song.artists || '';
-  return ['lyrics-v1', provider, id, song.name || song.title || '', artist].join('|');
+  // v2：解析层修复（[offset:] 平移、QQ qrc 相对行首基准）后旧缓存中 qrc 内容存在 yrc 字段会解析错位，故升版本强制重取
+  return ['lyrics-v2', provider, id, song.name || song.title || '', artist].join('|');
 }
 
 function readPersistentLyricCache(song) {
@@ -126,18 +161,62 @@ async function runQueueLyricPrefetch(fromIndex, token) {
 function applyFetchedLyricResponse(song, token, response, options) {
   options = options || {};
   if (token !== trackSwitchToken) return null;
+  // 丢弃"请求发起后歌词身份已变化"的过期结果（如网易云站内换录音 sourceMatch / 换源），
+  // 避免旧平台或旧录音的歌词串台覆盖。expectSourceKey 是 fetchLyric 发起请求那一刻捕获的身份。
+  if (song && options.expectSourceKey && typeof lyricPlaybackSourceKey === 'function') {
+    var currentSourceKey = lyricPlaybackSourceKey(song);
+    if (currentSourceKey && currentSourceKey !== options.expectSourceKey) return null;
+  }
   var mergedResponse = mergeInlineLyricResponseForSong(song, response || {});
   cancelPendingTrackFallbackLyrics();
   var state = parseLyricResponseToOriginalState(song, mergedResponse);
   setOriginalLyricsState(state.lines, state.hasNativeKaraoke, state.timingSource, state.translationLines, state.translationSource);
   applyPreferredLyricsForCurrent(true);
   scheduleNeteaseLyricTranslationFallback(song, token, state);
+  maybeWarnLyricTimelineMismatch(song, state);
   if (state.usableLyric && options.persist !== false) writePersistentLyricCache(song, mergedResponse);
   return state;
 }
 
+// 歌词时间轴与音频时长的偏差（秒）；未知或太短返回 0
+function lyricTimelineMismatchDeltaSeconds(state, song) {
+  var lines = state && state.lines;
+  if (!Array.isArray(lines) || !lines.length) return 0;
+  var last = lines[lines.length - 1];
+  if (!last || last.fallback) return 0;
+  var lyricEndSec = (Number(last.t) || 0) + Math.max(1, Number(last.duration) || 4.8);
+  var refSec = 0;
+  if (typeof getPlaybackDurationSeconds === 'function') refSec = Number(getPlaybackDurationSeconds()) || 0;
+  if (!refSec && song) refSec = playbackDurationFromSong(song);
+  if (!refSec || refSec < 25) return 0;
+  return Math.abs(lyricEndSec - refSec);
+}
+var lyricTimelineWarnedKeys = {};
+// 版本不匹配兜底提示：同名同歌手的 Live/重制/翻唱版歌词时间轴与音频时长明显不符
+function maybeWarnLyricTimelineMismatch(song, state) {
+  if (!song || !state || !state.usableLyric) return;
+  var delta = lyricTimelineMismatchDeltaSeconds(state, song);
+  if (delta <= 0) return;
+  var refSec = 0;
+  if (typeof getPlaybackDurationSeconds === 'function') refSec = Number(getPlaybackDurationSeconds()) || 0;
+  if (!refSec && song) refSec = playbackDurationFromSong(song);
+  if (delta <= Math.max(8, refSec * 0.15)) return;
+  var key = typeof persistentLyricCacheKey === 'function' ? persistentLyricCacheKey(song) : '';
+  if (key && lyricTimelineWarnedKeys[key]) return;
+  if (key) lyricTimelineWarnedKeys[key] = true;
+  if (typeof showSourceFallbackNotice === 'function') {
+    showSourceFallbackNotice('歌词版本可能不匹配', '歌词时间轴与当前歌曲时长偏差约 ' + Math.round(delta) + 's，可能是翻唱/Live/重制版本。可在歌词校准中微调，或更换音源。');
+  } else if (typeof showToast === 'function') {
+    showToast('歌词版本可能不匹配，可校准或换源');
+  }
+}
+
 function refreshPersistentLyricCache(song) {
+  if (!song || typeof song !== 'object') return;
+  var expectSourceKey = lyricPlaybackSourceKey(song);
   apiJson(lyricEndpointForSong(song)).then(function (response) {
+    // 刷新期间换源/换录音时，丢弃过期响应，避免把旧平台歌词写进新身份缓存
+    if (expectSourceKey && lyricPlaybackSourceKey(song) !== expectSourceKey) return;
     var mergedResponse = mergeInlineLyricResponseForSong(song, response || {});
     var state = parseLyricResponseToOriginalState(song, mergedResponse);
     if (state && state.usableLyric) writePersistentLyricCache(song, mergedResponse);
@@ -149,7 +228,9 @@ function mergeInlineLyricResponseForSong(song, response) {
   if (!song || typeof song !== 'object') return response;
   if (!response.lyric && song.lyric) response.lyric = song.lyric;
   if (!response.tlyric) response.tlyric = lyricTranslationTextFromAliases(song);
-  if (!response.yrc && (song.yrc || song.qrc)) response.yrc = song.yrc || song.qrc;
+  // 逐字歌词分开保留：网易云 yrc（字词绝对时间）与 QQ qrc（字词相对行首）基准不同
+  if (!response.yrc && song.yrc) response.yrc = song.yrc;
+  if (!response.qrc && song.qrc) response.qrc = song.qrc;
   if (!response.ytlrc && song.ytlrc) response.ytlrc = song.ytlrc;
   return response;
 }
@@ -283,7 +364,8 @@ function withLyricFallbackForSong(song, lines) {
 }
 function parseLyricResponseToOriginalState(song, response) {
   response = response || {};
-  var nativeLines = parseYrcText(response.yrc || '');
+  // 网易云 YRC 字词时间为绝对毫秒；QQ QRC 字词偏移相对行首（有 qrc 且无 yrc 时按 QRC 基准解析）
+  var nativeLines = parseYrcText(response.yrc || response.qrc || '', !!response.qrc && !response.yrc);
   var lrcLines = parseLyricText(response.lyric || '');
   var translationPayload = buildLyricTranslationPayload(response);
   var translationLines = translationPayload.lines;
@@ -349,16 +431,22 @@ async function fetchLyric(songOrId, token, attempt) {
   var song;
   try {
     song = (songOrId && typeof songOrId === 'object') ? songOrId : null;
+    if (song && typeof lyricPlaybackSourceKey === 'function') song.__lyricFetchedSourceKey = lyricPlaybackSourceKey(song);
+    // 缓存 key 在 readPersistentLyricCache 内部按读取前的身份计算，expectSourceKey 也必须用同一时刻的身份
+    var cacheExpectSourceKey = song ? lyricPlaybackSourceKey(song) : '';
     var cachedResponse = song ? await readPersistentLyricCache(song) : null;
     if (cachedResponse) {
-      var cachedState = applyFetchedLyricResponse(song, token, cachedResponse, { persist: false });
+      // 读取期间发生换源/换录音时，expectSourceKey 与当前身份不匹配，该缓存会被丢弃并改走网络请求
+      var cachedState = applyFetchedLyricResponse(song, token, cachedResponse, { persist: false, expectSourceKey: cacheExpectSourceKey });
       if (cachedState && cachedState.usableLyric) {
         refreshPersistentLyricCache(song);
         return;
       }
     }
+    // 请求发起时捕获歌词身份：期间发生换源/换录音时，返回结果会被 applyFetchedLyricResponse 丢弃
+    var expectSourceKey = song ? lyricPlaybackSourceKey(song) : '';
     var r = await apiJson(lyricEndpointForSong(song || songOrId));
-    var state = applyFetchedLyricResponse(song, token, r);
+    var state = applyFetchedLyricResponse(song, token, r, { expectSourceKey: expectSourceKey });
     if (!state) return;
     if (!state.usableLyric && shouldRetryStartupLyricFetch(song, token, attempt)) scheduleStartupLyricFetchRetry(song, token, attempt);
   } catch (e) {
@@ -369,6 +457,18 @@ async function fetchLyric(songOrId, token, attempt) {
     applyPreferredLyricsForCurrent(true);
     if (shouldRetryStartupLyricFetch(song, token, attempt)) scheduleStartupLyricFetchRetry(song, token, attempt);
   }
+}
+// 播放解析完成后调用：若实际播放源（平台或录音版本）与早期 fetchLyric 时不同，
+// 重新获取对应平台的歌词，避免歌曲平台与歌词平台不符。
+function ensureLyricMatchesResolvedSource(song, token) {
+  if (!song || typeof song !== 'object') return;
+  if (song.type === 'podcast' || song.type === 'local' || song.source === 'local' || song.localUrl) return;
+  if (typeof fetchLyric !== 'function' || typeof lyricPlaybackSourceKey !== 'function') return;
+  var sourceKey = lyricPlaybackSourceKey(song);
+  if (!sourceKey) return;
+  if (song.__lyricFetchedSourceKey && song.__lyricFetchedSourceKey === sourceKey) return;
+  if (typeof resetLyricsForTrackSwitch === 'function') resetLyricsForTrackSwitch(song, token);
+  fetchLyric(song, token);
 }
 function currentLyricFallbackText() {
   return lyricFallbackTextForSong(currentLyricSong() || {});
@@ -393,6 +493,13 @@ function lyricTagTimeToSeconds(min, sec, frac) {
   if (frac) t += (parseInt(frac, 10) || 0) / Math.pow(10, Math.min(3, frac.length));
   return t;
 }
+// LRC 的 [offset:±毫秒] 标签：整体平移时间轴，带 offset 的歌词不再错位
+function lyricOffsetSecondsFromText(text) {
+  var m = String(text || '').match(/\[offset:\s*([+-]?\d+)\s*\]/i);
+  if (!m) return 0;
+  var ms = parseInt(m[1], 10);
+  return isFinite(ms) ? (ms / 1000) : 0;
+}
 function finalizeLyricLineDurations(lines) {
   lines.sort(function (a, b) { return a.t - b.t; });
   for (var i = 0; i < lines.length; i++) {
@@ -406,11 +513,12 @@ function finalizeLyricLineDurations(lines) {
 }
 function parseLyricText(text) {
   var lines = [], reg = /\[(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?\]/g;
+  var offsetSeconds = lyricOffsetSecondsFromText(text);
   text.split(/\r?\n/).forEach(function (line) {
     var tags = [], times = [], m;
     reg.lastIndex = 0;
     while ((m = reg.exec(line))) {
-      var t = lyricTagTimeToSeconds(m[1], m[2], m[3]);
+      var t = Math.max(0, lyricTagTimeToSeconds(m[1], m[2], m[3]) + offsetSeconds);
       times.push(t);
       tags.push({ t: t, index: m.index, end: reg.lastIndex });
     }
@@ -607,8 +715,9 @@ function attachLyricTranslations(primaryLines, translationLines) {
   });
   return primary;
 }
-function parseYrcText(text) {
+function parseYrcText(text, relativeWordTimes) {
   var lines = [];
+  var offsetSeconds = lyricOffsetSecondsFromText(text);
   String(text || '').split(/\r?\n/).forEach(function (line) {
     var m = line.match(/^\[(\d+),(\d+)\](.*)$/);
     if (!m) return;
@@ -622,7 +731,14 @@ function parseYrcText(text) {
       if (!txt) continue;
       var rawStart = parseInt(wm[1], 10) || 0;
       var rawDur = parseInt(wm[2], 10) || 0;
-      var absStartMs = rawStart >= lineStartMs - 500 ? rawStart : lineStartMs + rawStart;
+      // 网易云 YRC 的字词时间是绝对毫秒；QQ QRC 的字词偏移相对行首。
+      // 明确知道是 QRC 时用相对基准，避免前几秒的歌曲被启发式误判。
+      var absStartMs = relativeWordTimes
+        ? lineStartMs + rawStart
+        : (rawStart >= lineStartMs - 500 ? rawStart : lineStartMs + rawStart);
+      // 字词不早于行开始（同基准比较后统一加 offset 并 clamp 到 0）
+      absStartMs = Math.max(lineStartMs, absStartMs) + offsetSeconds * 1000;
+      absStartMs = Math.max(0, absStartMs);
       var c0 = fullText.length;
       fullText += txt;
       words.push({ text: txt, t: absStartMs / 1000, d: Math.max(0.06, rawDur / 1000), c0: c0, c1: fullText.length });
@@ -638,7 +754,7 @@ function parseYrcText(text) {
       });
       words = words.filter(function (w) { return w.c1 > w.c0; });
     }
-    lines.push({ t: lineStartMs / 1000, duration: lineDurMs / 1000, text: fullText, words: words, charCount: Math.max(1, fullText.length), source: words.length ? 'yrc-word' : 'yrc-line' });
+    lines.push({ t: Math.max(0, lineStartMs / 1000 + offsetSeconds), duration: lineDurMs / 1000, text: fullText, words: words, charCount: Math.max(1, fullText.length), source: words.length ? 'yrc-word' : 'yrc-line' });
   });
   return finalizeLyricLineDurations(lines);
 }
@@ -685,7 +801,141 @@ function toggleLyricsPanel(force) {
     showToast('歌词已关闭');
   }
   lyricsVisible = fx.particleLyrics;
+  updateLyricsToggleBtnState();
 }
+
+// ============================================================
+//  播放栏歌词按钮：单击 = 应用内歌词，长按(≥500ms)/右键 = 桌面歌词
+var lyricsBarLongPressTimer = 0;
+var lyricsBarLongPressFired = false;
+var lyricsBarMoved = false;
+
+function updateLyricsToggleBtnState() {
+  var btn = document.getElementById('lyrics-toggle-btn');
+  if (!btn || typeof fx === 'undefined') return;
+  var inApp = !!fx.particleLyrics;
+  var desktop = !!fx.desktopLyrics;
+  btn.classList.toggle('active', inApp);
+  btn.classList.toggle('desktop-active', desktop && !inApp);
+  btn.setAttribute('aria-pressed', inApp ? 'true' : 'false');
+  var tip = desktop && !inApp
+    ? '桌面歌词已开启 · 单击开关应用内歌词，长按或右键关闭桌面歌词'
+    : inApp
+      ? '应用内歌词已开启 · 单击关闭，长按或右键开关桌面歌词'
+      : '歌词 · 单击开关应用内歌词，长按或右键开关桌面歌词';
+  btn.title = tip;
+  btn.setAttribute('aria-label', tip);
+  updateDesktopLyricsBtnState();
+}
+function updateDesktopLyricsBtnState() {
+  var btn = document.getElementById('desktop-lyrics-btn');
+  if (!btn || typeof fx === 'undefined') return;
+  var desktop = !!fx.desktopLyrics;
+  btn.classList.toggle('active', desktop);
+  btn.setAttribute('aria-pressed', desktop ? 'true' : 'false');
+  btn.title = desktop ? '桌面歌词已开启 · 点击关闭' : '桌面歌词已关闭 · 点击开启';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+function toggleDesktopLyricsFromPlayerBar() {
+  if (typeof toggleFx !== 'function') return;
+  toggleFx('desktopLyrics');
+  updateLyricsToggleBtnState();
+}
+
+function bindLyricsToggleBtn() {
+  var btn = document.getElementById('lyrics-toggle-btn');
+  if (!btn || btn.__lyricsToggleBound) return;
+  btn.__lyricsToggleBound = true;
+  var downX = 0, downY = 0;
+  function clearLongPress() {
+    if (lyricsBarLongPressTimer) {
+      clearTimeout(lyricsBarLongPressTimer);
+      lyricsBarLongPressTimer = 0;
+    }
+  }
+  function releasePointerCapture(e) {
+    try {
+      if (btn.hasPointerCapture && btn.hasPointerCapture(e.pointerId)) btn.releasePointerCapture(e.pointerId);
+    } catch (err) { }
+  }
+  btn.addEventListener('pointerdown', function (e) {
+    // 每次新按下无条件重置标志，避免上一次交互残留影响本次
+    lyricsBarLongPressFired = false;
+    lyricsBarMoved = false;
+    clearLongPress();
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    downX = e.clientX;
+    downY = e.clientY;
+    // 捕获指针：按住后即使滑出按钮（按钮很小，触摸板抖动/边缘按下常见），
+    // pointermove/pointerup 仍送达按钮，长按判定与取消才不会丢失事件源
+    try { btn.setPointerCapture(e.pointerId); } catch (err) { }
+    lyricsBarLongPressTimer = setTimeout(function () {
+      lyricsBarLongPressTimer = 0;
+      lyricsBarLongPressFired = true;
+      toggleDesktopLyricsFromPlayerBar();
+    }, 500);
+  });
+  // 长按取消改由"按下后位移 >10px"判定，而不是 pointerleave：
+  // 触摸板按压时指针常有微小抖动，一旦越过按钮边缘（按钮很小）就会被
+  // pointerleave 误取消，导致长按无反应；10px 以内的抖动/按压位移不影响，
+  // 真正的"按住并滑走"（>10px）仍会取消，避免松手误触桌面歌词。
+  btn.addEventListener('pointermove', function (e) {
+    if (!lyricsBarLongPressTimer && !lyricsBarMoved) return;
+    var dx = e.clientX - downX;
+    var dy = e.clientY - downY;
+    if (Math.sqrt(dx * dx + dy * dy) > 10) {
+      lyricsBarMoved = true;
+      clearLongPress();
+    }
+  });
+  btn.addEventListener('pointerup', function (e) {
+    clearLongPress();
+    releasePointerCapture(e);
+  });
+  btn.addEventListener('pointercancel', function (e) {
+    clearLongPress();
+    releasePointerCapture(e);
+  });
+  // 单击：长按/右键切换后紧随的 click（含触屏合成 click）一律抑制，避免误切应用内歌词；
+  // 键盘合成 click（detail===0）不经过 pointerdown，直接放行
+  btn.addEventListener('click', function (e) {
+    if (e.detail === 0) {
+      toggleLyricsPanel();
+      return;
+    }
+    if (lyricsBarMoved) {
+      // 按下后滑移超阈值再松开：视为拖动而非单击
+      lyricsBarMoved = false;
+      return;
+    }
+    if (lyricsBarLongPressFired) {
+      lyricsBarLongPressFired = false;
+      return;
+    }
+    toggleLyricsPanel();
+  });
+  // 右键 / 触屏长按的系统菜单：切换桌面歌词并置标志以抑制随后的合成 click；
+  // 若长按定时器已先切换过（标志为 true），则只拦截系统菜单不重复切换
+  btn.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    clearLongPress();
+    if (lyricsBarLongPressFired) return;
+    lyricsBarLongPressFired = true;
+    toggleDesktopLyricsFromPlayerBar();
+  });
+  // 显式桌面歌词按钮：单击直接开关，不依赖长按/右键手势
+  var desktopBtn = document.getElementById('desktop-lyrics-btn');
+  if (desktopBtn) {
+    desktopBtn.addEventListener('click', function () {
+      if (typeof toggleFx === 'function') toggleFx('desktopLyrics');
+    });
+  }
+  updateLyricsToggleBtnState();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindLyricsToggleBtn);
+else bindLyricsToggleBtn();
 
 // ============================================================
 //  播放列表面板
