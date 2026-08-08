@@ -185,6 +185,16 @@ function mainLoopBackgroundDelayMs() {
   if (typeof isBackgroundReleaseMode === 'function' && isBackgroundReleaseMode()) return 1500;
   return 1000;
 }
+function mainLoopRuntimeMode(now) {
+  if (mainLoopDeepBackgroundSleeping()) return 'deep-background';
+  if (mainLoopInteractionActive(now)
+    || (typeof isProgressDragPreviewActive === 'function' && isProgressDragPreviewActive())
+    || (playing && audio && !audio.paused)) return 'active';
+  return 'visible-idle';
+}
+function mainLoopVisibleIdleDelayMs(now) {
+  return mainLoopRuntimeMode(now) === 'visible-idle' ? 1000 / 24 : 0;
+}
 function requestMainLoopAnimationFrame() {
   if (mainLoopAnimationRequested) return;
   mainLoopAnimationRequested = true;
@@ -192,6 +202,7 @@ function requestMainLoopAnimationFrame() {
 }
 function scheduleNextMainLoopFrame() {
   var delay = mainLoopBackgroundDelayMs();
+  if (!delay) delay = mainLoopVisibleIdleDelayMs(performance.now());
   if (delay > 0) {
     if (mainLoopBackgroundTimer) return;
     mainLoopBackgroundTimer = setTimeout(function () {
@@ -199,6 +210,10 @@ function scheduleNextMainLoopFrame() {
       requestMainLoopAnimationFrame();
     }, delay);
     return;
+  }
+  if (mainLoopBackgroundTimer) {
+    clearTimeout(mainLoopBackgroundTimer);
+    mainLoopBackgroundTimer = 0;
   }
   requestMainLoopAnimationFrame();
 }

@@ -36,10 +36,10 @@ function consumeFrameGate(gate, now, dt, fps, force, reason) {
 }
 
 function runFrameGate(gate, now, fallbackDt) {
-  var stepDt = gate.pendingDt || fallbackDt || 0;
+  var stepDt = Math.min(gate.pendingDt || fallbackDt || 0, 0.18);
   gate.pendingDt = 0;
   gate.lastRunAt = now;
-  gate.lastDt = Math.min(stepDt, 0.18);
+  gate.lastDt = stepDt;
   gate.runs += 1;
   if (window.__mineradioPerf && window.__mineradioPerf.count) {
     window.__mineradioPerf.count('frameGate.' + gate.name + '.runs');
