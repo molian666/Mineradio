@@ -32,6 +32,22 @@ const {
   clearSpotifyToken,
 } = require('../spotify-api');
 
+// 应用名必须在第一次查询应用数据目录（appData）之前确定并设置：否则
+// Electron 会按默认名（package.json name）派生该目录，后续 setName 会
+// 改变派生路径，导致上方 LX UserApi 隔离 userData 与下方
+// STABLE_USER_DATA_PATH 指向不一致的根目录。定义提前到这里，保证所有
+// 派生路径稳定。
+const APP_PACKAGE_INFO = (() => {
+  try {
+    return require('../package.json');
+  } catch (_) {
+    return {};
+  }
+})();
+const APP_METADATA = APP_PACKAGE_INFO.mineradio || {};
+const APP_NAME = process.env.MINERADIO_RUNTIME_NAME || APP_METADATA.runtimeName || APP_PACKAGE_INFO.productName || 'Mineradio';
+app.setName(APP_NAME);
+
 registerWallpaperEngineScheme(protocol);
 registerLocalMusicScheme(protocol);
 /* mineradio-lx-addon: isolated UserApi runtime */
@@ -86,6 +102,7 @@ let localServerStartPromise = null;
 let mainWindowCreatePromise = null;
 let mainWindowRendererRecoveryPromise = null;
 let mainWindowRendererRecoveryAttempts = [];
+let mainWindowUnresponsiveTimer = null;
 let mainWindowFullscreenVisibilityTimer = null;
 let startupState = { pid: process.pid, startedAt: Date.now(), phase: 'module-loaded', events: [] };
 const registeredGlobalHotkeys = new Map();
@@ -100,15 +117,6 @@ const WINDOWED_SCALE = 3 / 4;
 const WINDOWED_MARGIN = 32;
 const MIN_WINDOWED_WIDTH = 960;
 const MIN_WINDOWED_HEIGHT = 540;
-const APP_PACKAGE_INFO = (() => {
-  try {
-    return require('../package.json');
-  } catch (_) {
-    return {};
-  }
-})();
-const APP_METADATA = APP_PACKAGE_INFO.mineradio || {};
-const APP_NAME = process.env.MINERADIO_RUNTIME_NAME || APP_METADATA.runtimeName || APP_PACKAGE_INFO.productName || 'Mineradio';
 const APP_USER_MODEL_ID = process.env.MINERADIO_APP_USER_MODEL_ID || APP_METADATA.appUserModelId || (APP_PACKAGE_INFO.build && APP_PACKAGE_INFO.build.appId) || 'com.mineradio.desktop';
 const APP_ICON_ICO = path.join(__dirname, '..', 'build', 'icon.ico');
 const CURRENT_FX_AUTOSAVE_FILE = 'current-fx-autosave.json';
@@ -121,6 +129,9 @@ const STARTUP_NAVIGATION_TIMEOUT_MS = 15000;
 const STARTUP_SHOW_WATCHDOG_MS = 3500;
 const RENDERER_RECOVERY_WINDOW_MS = 2 * 60 * 1000;
 const RENDERER_RECOVERY_MAX_ATTEMPTS = 3;
+// 渲染进程进入 unresponsive（Electron 检测到消息泵长时间停摆）后，再等待
+// 这么久仍无 responsive 事件，则强制终止渲染进程并走统一恢复管线重载。
+const UNRESPONSIVE_RECOVERY_DELAY_MS = 8000;
 const FULLSCREEN_VISIBILITY_CHECK_MS = 5000;
 const CACHE_SETTINGS_FILE = 'cache-settings.json';
 const DOWNLOAD_SETTINGS_FILE = 'download-settings.json';
@@ -155,8 +166,9 @@ const KUGOU_LOGIN_WARMUP_URL = 'https://www.kugou.com/newuc/user/uc/type=edit';
 const SPOTIFY_LOGIN_PARTITION = 'persist:mineradio-spotify-login';
 
 // Keep app-owned settings and provider credentials independent from the
-// user-selectable Chromium cache. app.setName() must run before the first
-// derived path lookup or Electron can recompute userData below the cache root.
+// user-selectable Chromium cache. app.setName() has already run at the top
+// of this file (before the first appData lookup) so Electron cannot
+// recompute userData below the cache root.
 app.setName(APP_NAME);
 const STARTUP_QA_USER_DATA_PATH = (() => {
   const value = String(process.env.MINERADIO_STARTUP_QA_USER_DATA || '').trim();
@@ -1702,6 +1714,23 @@ function sendWindowState(win) {
   win.webContents.send('desktop-window-state', getWindowState(win));
 }
 
+// 最小化/隐藏期间，渲染进程可能被后台内存清理（EmptyWorkingSet）压进长时间
+// 缺页恢复，窗口恢复瞬间发送的单条状态消息会排在渲染进程消息队列里迟迟无法
+// 处理，深度后台模式迟迟不退（画面冻结，表现为窗口“消失”、点任务栏没反应，
+// 只有再点一次任务栏缩略图/激活窗口才恢复）。恢复窗口时按递增间隔多次重发
+// 窗口状态，确保渲染进程缓过来后一定能退出深度后台模式并恢复渲染。
+function resendWindowStateAfterRestore(win) {
+  if (!win || win.isDestroyed()) return;
+  sendWindowState(win);
+  [400, 1600, 4000].forEach((delay) => {
+    setTimeout(() => {
+      if (!win || win.isDestroyed() || win !== mainWindow || appQuitting) return;
+      if (win.isMinimized() || !win.isVisible()) return;
+      sendWindowState(win);
+    }, delay);
+  });
+}
+
 function sendGlobalHotkeyAction(action) {
   if (!mainWindow || mainWindow.isDestroyed() || !action) return;
   mainWindow.webContents.send('mineradio-global-hotkey', { action });
@@ -1875,6 +1904,11 @@ async function getGpuDiagnostics() {
 }
 
 function collectAppTrimPids() {
+  // 只清理主进程与各窗口渲染进程。GPU/Utility 等 Chromium 子进程的工作集
+  // 绝不能通过 EmptyWorkingSet 清零：其驱动的设备上下文/命令缓冲状态被换出
+  // 后，窗口恢复绘制时会触发大量缺页并可能让 GPU 调用挂起，表现为主窗口
+  // 变透明、点击无响应（用户只能重启）。渲染进程是内存大头，保留其清理
+  // 即可达到后台省内存的目的。
   const pids = new Set([process.pid]);
   function addWindowProcess(win) {
     if (!win || win.isDestroyed()) return;
@@ -1883,11 +1917,8 @@ function collectAppTrimPids() {
       if (pid) pids.add(pid);
     } catch (e) {}
   }
-  addWindowProcess(mainWindow);
   try {
-    app.getAppMetrics().forEach((row) => {
-      if (row && Number.isFinite(Number(row.pid))) pids.add(Math.round(Number(row.pid)));
-    });
+    BrowserWindow.getAllWindows().forEach(addWindowProcess);
   } catch (e) {}
   return Array.from(pids);
 }
@@ -4017,6 +4048,21 @@ ipcMain.handle('mineradio-memory-trim-app', async (_event, payload = {}) => {
   return trimAppMemoryNow(payload.reason || 'renderer');
 });
 
+// 渲染进程 WebGL 上下文丢失（GPU 进程崩溃/驱动超时/恢复窗口时 GPU 状态
+// 异常）。Three.js 场景的 GPU 资源无法原地重建，强制终止渲染进程走既有
+// 恢复管线重载，避免窗口一直以透明/冻结状态存在。
+ipcMain.on('mineradio-renderer-webgl-context-lost', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win !== mainWindow || appQuitting) return;
+  console.warn('[WindowRecovery] renderer reported WebGL context lost; reloading the main window.');
+  try {
+    win.webContents.forcefullyCrashRenderer();
+  } catch (error) {
+    console.warn('[WindowRecovery] forcefullyCrashRenderer failed:', error && error.message || error);
+    recoverMainWindowAfterRendererGone(win, { reason: 'webgl-context-lost', exitCode: 0 });
+  }
+});
+
 ipcMain.handle('mineradio-memory-purge-system', async (_event, payload = {}) => {
   const mask = systemMemory.normalizeMask(payload && payload.mask);
   const autoElevate = payload && payload.autoElevate === true;
@@ -5595,6 +5641,10 @@ async function createWindowOnce() {
     console.warn('[StartupWindow] did-fail-load:', errorCode, errorDescription, validatedURL || '');
   });
   win.webContents.on('render-process-gone', (_event, details) => {
+    if (mainWindowUnresponsiveTimer) {
+      clearTimeout(mainWindowUnresponsiveTimer);
+      mainWindowUnresponsiveTimer = null;
+    }
     const cleanupPromise = Promise.allSettled([
       stopWallpaperEngineRuntimeForRenderer(`render-process-gone:${details && details.reason || 'unknown'}`),
       closeWallpaperWindow(`main-renderer-gone:${details && details.reason || 'unknown'}`),
@@ -5612,6 +5662,32 @@ async function createWindowOnce() {
   });
   win.on('unresponsive', () => {
     console.warn('[StartupWindow] main window became unresponsive', { startupCompleted });
+    // 渲染进程挂起（而非崩溃）时，render-process-gone 不会触发，窗口会一直
+    // 冻结（透明窗口表现为“消失”，点击无响应）。给渲染进程一段宽限时间，
+    // 若仍未恢复则强制终止它，交由既有 render-process-gone 恢复管线重载。
+    if (appQuitting || win !== mainWindow || mainWindowUnresponsiveTimer) return;
+    mainWindowUnresponsiveTimer = setTimeout(() => {
+      mainWindowUnresponsiveTimer = null;
+      if (!win || win.isDestroyed() || win !== mainWindow || appQuitting) return;
+      try {
+        if (win.webContents.isDestroyed()) return;
+      } catch (_) {
+        return;
+      }
+      console.warn('[WindowRecovery] renderer stayed unresponsive; forcing renderer termination and reloading the main window.');
+      try {
+        win.webContents.forcefullyCrashRenderer();
+      } catch (error) {
+        console.warn('[WindowRecovery] forcefullyCrashRenderer failed:', error && error.message || error);
+        recoverMainWindowAfterRendererGone(win, { reason: 'unresponsive-recovery', exitCode: 0 });
+      }
+    }, UNRESPONSIVE_RECOVERY_DELAY_MS);
+  });
+  win.on('responsive', () => {
+    if (mainWindowUnresponsiveTimer) {
+      clearTimeout(mainWindowUnresponsiveTimer);
+      mainWindowUnresponsiveTimer = null;
+    }
   });
 
   win.webContents.on('before-input-event', (event, input) => {
@@ -5642,13 +5718,13 @@ async function createWindowOnce() {
   });
   win.on('restore', () => {
     win.__mineradioIntentionalHide = false;
-    sendWindowState(win);
+    resendWindowStateAfterRestore(win);
     if (fullDesktopModeHostVisibilityTransitionDepth <= 0) resumeWallpaperEngineForVisibleHost(win, 'restore');
   });
   win.on('show', () => {
     win.__mineradioIntentionalHide = false;
     if (fullDesktopModeHostVisibilityTransitionDepth > 0) return;
-    sendWindowState(win);
+    resendWindowStateAfterRestore(win);
     resumeWallpaperEngineForVisibleHost(win, 'show');
   });
   win.on('hide', () => {

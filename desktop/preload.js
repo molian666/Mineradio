@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('desktopWindow', {
   exitFullscreenWindowed: () => ipcRenderer.invoke('desktop-window-exit-fullscreen-windowed'),
   getState: () => ipcRenderer.invoke('desktop-window-get-state'),
   getGpuDiagnostics: () => ipcRenderer.invoke('mineradio-get-gpu-diagnostics'),
+  notifyRendererWebglContextLost: (payload) => ipcRenderer.send('mineradio-renderer-webgl-context-lost', payload || {}),
   getMemorySnapshot: () => ipcRenderer.invoke('mineradio-memory-get-snapshot'),
   configureMemoryReduct: (payload) => ipcRenderer.invoke('mineradio-memory-configure-auto', payload || {}),
   trimAppMemory: (payload) => ipcRenderer.invoke('mineradio-memory-trim-app', payload || {}),

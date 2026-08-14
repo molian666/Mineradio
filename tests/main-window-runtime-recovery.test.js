@@ -110,9 +110,91 @@ function testFullscreenVisibilityAndSystemWakeGuards() {
   assert.match(mainText, /powerMonitor\.on\('unlock-screen',[\s\S]{0,140}restoreUnexpectedFullscreenVisibility\(mainWindow, 'screen-unlock'\)/, '解锁屏幕后必须检查全屏可见性');
 }
 
+function testAppMemoryTrimExcludesGpuProcesses() {
+  const block = sourceBlock(
+    mainText,
+    'function collectAppTrimPids()',
+    'function isMainWindowForegroundVisible()'
+  );
+  assert.doesNotMatch(block, /getAppMetrics/, 'EmptyWorkingSet 不得纳入 GPU/Utility 等 Chromium 子进程（会引发恢复窗口时 GPU 挂起）');
+  assert.match(block, /BrowserWindow\.getAllWindows\(\)/, '只应清理主进程与各窗口渲染进程');
+}
+
+function testUnresponsiveRendererRecovery() {
+  const block = sourceBlock(
+    mainText,
+    "win.on('unresponsive'",
+    "win.once('ready-to-show'"
+  );
+  assert.match(block, /mainWindowUnresponsiveTimer/, '挂起恢复必须有去重的定时器');
+  assert.match(block, /forcefullyCrashRenderer/, '挂起超时后必须强制终止渲染进程');
+  assert.match(block, /recoverMainWindowAfterRendererGone/, '挂起恢复必须复用统一恢复管线');
+  assert.match(block, /win\.on\('responsive'/, '渲染进程恢复响应后必须取消恢复定时器');
+  assert.match(block, /UNRESPONSIVE_RECOVERY_DELAY_MS/, '挂起宽限必须有明确的延迟常量');
+}
+
+function testWebglContextLostRecoveryBridge() {
+  assert.match(
+    mainText,
+    /ipcMain\.on\('mineradio-renderer-webgl-context-lost'[\s\S]{0,260}forcefullyCrashRenderer\(\)/,
+    '主进程必须注册 WebGL 上下文丢失 IPC 并强制终止渲染进程'
+  );
+  const preloadText = fs.readFileSync(path.join(appRoot, 'desktop', 'preload.js'), 'utf8');
+  assert.match(preloadText, /notifyRendererWebglContextLost/, 'preload 必须暴露 WebGL 上下文丢失上报通道');
+  const rendererQualityText = fs.readFileSync(
+    path.join(appRoot, 'public', 'js', 'modules', '01-scene', '00-renderer-quality.js'),
+    'utf8'
+  );
+  assert.match(rendererQualityText, /webglcontextlost/, '渲染进程必须监听 webglcontextlost');
+  assert.match(rendererQualityText, /event\.preventDefault\(\)/, 'contextlost 必须 preventDefault 以允许上下文恢复');
+}
+
+function testRestoreResendsWindowState() {
+  const block = sourceBlock(
+    mainText,
+    'function resendWindowStateAfterRestore(win)',
+    'function scheduleWindowStateSend(win, delay = 80)'
+  );
+  assert.match(block, /sendWindowState\(win\)/, '恢复后必须发送窗口状态');
+  assert.match(block, /\[400, 1600, 4000\]\.forEach/, '恢复后必须按递增间隔多次重发窗口状态');
+  assert.match(block, /win\.isMinimized\(\) \|\| !win\.isVisible\(\)/, '窗口重新隐藏后不得继续重发');
+
+  const restoreBlock = sourceBlock(
+    mainText,
+    "win.on('restore'",
+    "win.on('show'"
+  );
+  assert.match(restoreBlock, /resendWindowStateAfterRestore\(win\)/, 'restore 必须走多次重发');
+  assert.match(mainText, /win\.on\('show'[\s\S]{0,200}resendWindowStateAfterRestore\(win\)/, 'show 必须走多次重发');
+
+  const rendererPowerText = fs.readFileSync(
+    path.join(appRoot, 'public', 'js', 'modules', '00-state', '08-desktop-render-power.js'),
+    'utf8'
+  );
+  assert.match(
+    rendererPowerText,
+    /function forceRecoverFromStaleBackgroundState[\s\S]{0,260}document\.visibilityState === 'visible'/,
+    '渲染进程必须以浏览器可见性纠正滞后的窗口状态'
+  );
+  assert.match(
+    rendererPowerText,
+    /window\.addEventListener\('focus'[\s\S]{0,120}forceRecoverFromStaleBackgroundState\('focus'\)/,
+    '窗口聚焦（含任务栏缩略图点击激活）必须强制恢复'
+  );
+  assert.match(
+    rendererPowerText,
+    /document\.addEventListener\('visibilitychange'[\s\S]{0,80}forceRecoverFromStaleBackgroundState\('visibilitychange'\)/,
+    '页面可见性变化必须强制恢复'
+  );
+}
+
 testLoginWishTitle();
 testWallpaperEngineElevationBroker();
 testRendererGoneDelayedRecovery();
 testFullscreenVisibilityAndSystemWakeGuards();
+testAppMemoryTrimExcludesGpuProcesses();
+testUnresponsiveRendererRecovery();
+testWebglContextLostRecoveryBridge();
+testRestoreResendsWindowState();
 
 console.log('[OK] Main-window runtime recovery preserves elevated WE broker launch and restores unexpected fullscreen loss.');

@@ -33,6 +33,13 @@ var spotifyLoginStatus = { provider: 'spotify', loggedIn: false, configured: fal
 var spotifyLoginAutoRefreshTimer = null;
 var qqLoginWasLoggedIn = false;
 var kugouLoginWasLoggedIn = false;
+// 歌单同步被酷狗明确判为"会话失效"（reauthRequired，如 20017）后置位，
+// 期间登录状态接口即使报告 cookie 存在也保持"已失效"，直到用户重新登录成功。
+var kugouSessionInvalidated = false;
+// 会话失效提示节流：同一轮失效期间只 toast 一次，避免 45s 自动刷新重复打扰。
+var qqSessionExpiredNotified = false;
+var kugouSessionExpiredNotified = false;
+var qishuiSessionExpiredNotified = false;
 var qishuiLoginWasLoggedIn = false;
 var spotifyLoginWasLoggedIn = false;
 var loginProvider = 'netease';

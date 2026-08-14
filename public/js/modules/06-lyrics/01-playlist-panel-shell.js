@@ -519,11 +519,15 @@ function applyPlaylistCatalogSyncResult(previousRows, response) {
   if (!response || typeof response !== 'object') {
     return { rows: previous, synced: false, error: 'INVALID_PLAYLIST_CATALOG_RESPONSE' };
   }
-  if (response.error || !Array.isArray(response.playlists)) {
+  var sessionExpired = response.loggedIn === false || !!response.reauthRequired;
+  if (response.error || sessionExpired || !Array.isArray(response.playlists)) {
     return {
-      rows: previous,
+      // 会话失效（cookie 过期/平台要求重新登录）时清空该平台歌单而非保留
+      // 旧数据：保留过期歌单会误导用户以为账号正常，还会让同步反复失败。
+      rows: sessionExpired ? [] : previous,
       synced: false,
-      error: String(response.error || 'INVALID_PLAYLIST_CATALOG_RESPONSE')
+      error: String(response.message || response.error || (sessionExpired ? 'PLAYLIST_CATALOG_SESSION_EXPIRED' : 'INVALID_PLAYLIST_CATALOG_RESPONSE')),
+      sessionExpired: sessionExpired
     };
   }
   return { rows: response.playlists.slice(), synced: true, error: '' };
@@ -637,6 +641,11 @@ async function loadPlaylistCatalogProviderPage(provider, reason) {
     state.error = e && e.message || 'PLAYLIST_CATALOG_PAGE_FAILED';
     state.hasMore = false;
     playlistCatalogSyncState.error = state.error;
+    // 酷狗会话失效（reauthRequired）时立即把登录状态标记为失效并提示
+    // 重新登录，而不是继续显示"已登录 + 空歌单"反复同步失败。
+    if (provider === 'kugou' && syncResult && syncResult.sessionExpired && typeof markKugouSessionExpired === 'function') {
+      markKugouSessionExpired();
+    }
     if (userPlaylists.length) renderUserPlaylistsList({ preserveScroll: true });
     return false;
   } finally {

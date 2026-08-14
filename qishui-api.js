@@ -2059,6 +2059,7 @@ async function fetchQishuiWebLibrary(cookieText) {
     const recentTracks = [];
     const cardTracks = [];
     const errors = [];
+    let sessionExpired = false;
     const addSongs = (target, songs) => {
       target.push(...dedupeQishuiSongs(songs || []));
     };
@@ -2093,6 +2094,10 @@ async function fetchQishuiWebLibrary(cookieText) {
         return json;
       } catch (err) {
         if (!requestOpts.optional) errors.push(label + ':' + (err && err.message || 'failed'));
+        // 汽水 PC 接口 401/403 即会话失效（cookie 过期或已被登出）：
+        // 记录标记，供登录状态接口把"已登录"降级为失效，避免前端一直
+        // 显示已登录却拉不到歌单（与 QQ/酷狗会话失效修复保持一致）。
+        if (err && (err.statusCode === 401 || err.statusCode === 403)) sessionExpired = true;
         return null;
       }
     };
@@ -2143,6 +2148,7 @@ async function fetchQishuiWebLibrary(cookieText) {
       recentTracks: dedupeQishuiSongs(recentTracks),
       profile,
       errors,
+      sessionExpired,
     };
   });
 }
@@ -2152,6 +2158,20 @@ async function handleQishuiStatus(cookieText) {
   if (!status.webSession) return status;
   try {
     const library = await fetchQishuiWebLibrary(cookieText);
+    if (library && library.sessionExpired) {
+      // 汽水 PC 接口明确返回未登录（401/403）：cookie 仍在文件里但服务端
+      // 会话已失效，必须把登录状态降级为失效，否则前端一直显示已登录、
+      // 歌单同步却反复失败（用户只能靠手动重新登录恢复）。
+      status.webSession = false;
+      status.loggedIn = false;
+      status.cookieReady = false;
+      status.configured = !!status.tokenConfigured;
+      status.sessionExpired = true;
+      status.stale = true;
+      status.profileReady = false;
+      status.profileError = 'QISHUI_SESSION_EXPIRED';
+      return status;
+    }
     const profile = library && library.profile || {};
     if (profile.profileReady) {
       status.userId = profile.userId || status.userId;

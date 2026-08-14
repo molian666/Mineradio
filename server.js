@@ -151,7 +151,10 @@ const {
 const { planCuefieldTransitionFromCache } = require('./cuefield/mineradio-bridge');
 
 const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
+// 默认只监听回环地址：本地服务器只服务本机渲染进程，不应暴露到局域网。
+// Electron 主进程已显式设置 HOST=127.0.0.1；这里兜底防止纯 node 运行
+// server.js 时开放代理接口被局域网内其他设备滥用。
+const HOST = process.env.HOST || '127.0.0.1';
 const LOGIN_EASTER_EGG_GATE_FILE = String(process.env.MINERADIO_LOGIN_EASTER_EGG_GATE_FILE || '');
 const LOGIN_EASTER_EGG_GATE_VERSION = String(process.env.MINERADIO_LOGIN_EASTER_EGG_GATE_VERSION || 'world-peace-v1');
 const LOGIN_EASTER_EGG_PROTECTED_ROUTES = new Set([
@@ -2893,7 +2896,14 @@ async function getQQLoginInfo(options) {
     const info = normalizeQQProfile(body, cookieObj);
     const vipProbe = await vipProbePromise;
     if (body && (body.code === 1000 || body.result === 301)) {
-      return mergeQQVipStatus({ ...fallback, profileUnavailable: true }, vipProbe, vipProbe && vipProbe.vipSource);
+      // QQ 官方明确返回"需要重新登录"（会话过期/票据失效）。此时保存的
+      // cookie 里仍有 uin+musicKey，不能再伪装成已登录：否则前端会一直
+      // 显示"已登录"却拉不到歌单，用户只能靠手动重新登录才能恢复同步。
+      // 这里显式标记 sessionExpired，让前端提示重新登录并清空该平台歌单。
+      return Object.assign(
+        mergeQQVipStatus({ ...fallback, profileUnavailable: true }, vipProbe, vipProbe && vipProbe.vipSource),
+        { loggedIn: false, sessionExpired: true, stale: true }
+      );
     }
     return mergeQQVipStatus(info, vipProbe, vipProbe && vipProbe.vipSource);
   } catch (e) {
@@ -2926,6 +2936,32 @@ function audioProxyHeadersFor(audioUrl, range) {
   } catch (e) {}
   if (range) headers.Range = range;
   return headers;
+}
+
+// 代理目标 URL 的 SSRF 防护：拒绝环回、链路本地与私网地址。
+// 与 .mineradio-lx-addon/runtime/approved-audio-proxy.js 的 isPrivateHost
+// 保持同一安全模型——/api/audio 与 /api/cover 是开放代理接口，若不拦截
+// 私网目标，本机恶意页面/进程（或非 Electron 部署时局域网内的其他设备）
+// 可借其访问内网服务与云元数据（169.254.169.254）等敏感地址。
+function isPrivateUpstreamUrl(audioUrl) {
+  let parsed;
+  try { parsed = new URL(String(audioUrl || '')); } catch (_) { return true; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return true;
+  const host = String(parsed.hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.endsWith('.local')) return true;
+  if (host.includes(':')) {
+    // IPv6：环回 ::1 已覆盖；链路本地 fe80::/10 与唯一本地 fc00::/7 拒绝。
+    if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
+    return false;
+  }
+  const parts = host.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) return false;
+  if (parts[0] === 10) return true;                       // 10.0.0.0/8
+  if (parts[0] === 127) return true;                      // 127.0.0.0/8
+  if (parts[0] === 169 && parts[1] === 254) return true;  // 169.254.0.0/16（含云元数据）
+  if (parts[0] === 192 && parts[1] === 168) return true;  // 192.168.0.0/16
+  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true; // 172.16.0.0/12
+  return false;
 }
 
 function qishuiAudioAuthFromUrl(audioUrl) {
@@ -7594,6 +7630,13 @@ const server = http.createServer(async (req, res) => {
         res.end('Invalid cover url');
         return;
       }
+      // SSRF 防护：拒绝环回/私网/链路本地目标，避免本机进程与局域网设备
+      // 借该开放代理访问内网服务或云元数据（169.254.169.254）。
+      if (isPrivateUpstreamUrl(coverUrl)) {
+        res.writeHead(403, { 'Access-Control-Allow-Origin': '*' });
+        res.end('Cover url is not allowed');
+        return;
+      }
       const resp = await fetch(coverUrl, { headers: { 'User-Agent': UA, 'Referer': 'https://music.163.com/' } });
       const ct  = resp.headers.get('content-type') || 'image/jpeg';
       const cl  = resp.headers.get('content-length');
@@ -7617,6 +7660,11 @@ const server = http.createServer(async (req, res) => {
     try {
       const audioUrl = url.searchParams.get('url');
       if (!audioUrl) { res.writeHead(400); res.end('Missing url'); return; }
+      // SSRF 防护：拒绝环回/私网/链路本地目标（含 qishui #auth= 解密路径）。
+      if (isPrivateUpstreamUrl(audioUrl)) {
+        res.writeHead(403); res.end('Audio url is not allowed');
+        return;
+      }
       const range = req.headers.range || '';
       if (audioUrl.includes('#auth=')) {
         const decrypted = await getQishuiDecryptedAudio(audioUrl);

@@ -1639,7 +1639,7 @@ async function getKugouLoginInfo(cookie) {
   });
   return {
     provider: 'kugou',
-    loggedIn: auth.loggedIn,
+    loggedIn: !!auth.loggedIn,
     playbackReady: auth.playbackReady,
     playbackKeyReady: auth.playbackReady,
     userId: auth.userid,
@@ -1868,7 +1868,9 @@ async function handleKugouUserPlaylists(cookie) {
     });
     return {
       provider: 'kugou',
-      loggedIn: true,
+      // 会话失效（reauthRequired）时不能伪装已登录：前端据此清空该平台
+      // 歌单并提示重新登录，而不是把空歌单当作正常同步结果反复重试。
+      loggedIn: !!auth.loggedIn && !failure.reauthRequired,
       playbackReady: auth.playbackReady,
       playlists: [],
       error: failure.error,

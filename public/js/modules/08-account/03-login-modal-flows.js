@@ -1381,6 +1381,9 @@ async function openKugouWebLogin() {
     });
     if (!info || !info.loggedIn) throw new Error((info && (info.message || info.error)) || '酷狗会话不可用');
     kugouLoginStatus = normalizeKugouLoginStatus(info);
+    // 重新登录成功：清除此前歌单同步确认的"会话失效"标记，恢复自动同步。
+    kugouSessionInvalidated = false;
+    kugouSessionExpiredNotified = false;
     activeAccountProvider = 'kugou';
     kugouManualCookieOpen = false;
     renderUserBtn();
@@ -1432,7 +1435,12 @@ async function submitQQCookieLogin() {
       body: JSON.stringify({ cookie: cookie })
     });
     if (!info || !info.loggedIn) throw new Error((info && (info.message || info.error)) || (isKugou ? '酷狗会话不可用' : 'QQ 会话不可用'));
-    if (isKugou) kugouLoginStatus = normalizeKugouLoginStatus(info);
+    if (isKugou) {
+      kugouLoginStatus = normalizeKugouLoginStatus(info);
+      // 重新登录成功：清除此前歌单同步确认的"会话失效"标记，恢复自动同步。
+      kugouSessionInvalidated = false;
+      kugouSessionExpiredNotified = false;
+    }
     else {
       qqLoginStatus = normalizeQQLoginStatus(info);
       auditProviderVipState('qq', qqLoginStatus);

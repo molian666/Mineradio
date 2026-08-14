@@ -147,7 +147,8 @@ function normalizeQQLoginStatus(info) {
     vipLevel: info && (info.vipLevel || info.vip_level) || 'none',
     isVip: !!(info && info.isVip),
     isSvip: !!(info && info.isSvip),
-    stale: !!(info && info.stale),
+    stale: !!info.stale || !!(info.sessionExpired) || !!(info.profileUnavailable && !(info.nickname && info.avatar)),
+    sessionExpired: !!(info && info.sessionExpired),
     vipCheckedAt: Number(info && info.vipCheckedAt || 0) || 0,
     vipSource: info && info.vipSource || '',
     vipProbeAvailable: !!(info && info.vipProbeAvailable),
@@ -160,7 +161,10 @@ function normalizeQQLoginStatus(info) {
   });
   return Object.assign({}, fallback, info, {
     provider: 'qq',
-    loggedIn: true,
+    // QQ 官方明确返回"需要重新登录"（code 1000 / result 301）时，即使
+    // cookie 文件里还有 uin+musicKey，也必须按掉登录处理：否则前端会
+    // 一直显示已登录、歌单同步却永远失败（见服务端 getQQLoginInfo）。
+    loggedIn: !(info && info.sessionExpired),
     nickname: info.nickname || fallback.nickname,
     userId: info.userId || info.uin || '',
     avatar: info.avatar || '',
@@ -171,7 +175,8 @@ function normalizeQQLoginStatus(info) {
     isSvip: !!info.isSvip,
     playbackKeyReady: !!info.playbackKeyReady,
     loginType: info.loginType || '',
-    stale: !!info.stale || !!(info.profileUnavailable && !(info.nickname && info.avatar)),
+    stale: !!info.stale || !!(info.sessionExpired) || !!(info.profileUnavailable && !(info.nickname && info.avatar)),
+    sessionExpired: !!(info.sessionExpired),
     vipCheckedAt: Number(info.vipCheckedAt || 0) || 0,
     vipSource: info.vipSource || '',
     vipProbeAvailable: !!info.vipProbeAvailable,
@@ -228,7 +233,9 @@ async function refreshQQLoginStatus(options) {
     qqLoginStatus = normalizeQQLoginStatus(info);
     auditProviderVipState('qq', qqLoginStatus);
     if (!qqLoginStatus.loggedIn) {
-      if (prevLogged || qqLoginWasLoggedIn) showToast(qqLoginStatus.stale ? 'QQ 音乐登录已失效' : 'QQ 音乐已掉登录');
+      if (qqLoginStatus.sessionExpired) {
+        if (!qqSessionExpiredNotified) { qqSessionExpiredNotified = true; showToast('QQ 音乐登录已失效，请重新登录'); }
+      } else if (prevLogged || qqLoginWasLoggedIn) showToast(qqLoginStatus.stale ? 'QQ 音乐登录已失效' : 'QQ 音乐已掉登录');
       qqPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qq'; });
       playlistCatalogRevision += 1;
@@ -241,6 +248,7 @@ async function refreshQQLoginStatus(options) {
     } else if (qqLoginStatus.stale) {
       showToast('QQ 音乐登录状态可能已失效');
     }
+    if (qqLoginStatus.loggedIn) qqSessionExpiredNotified = false;
     qqLoginWasLoggedIn = !!qqLoginStatus.loggedIn;
     if (!hasPlatformLogin(activeAccountProvider)) activeAccountProvider = firstLoggedProvider();
     renderUserBtn();
@@ -285,7 +293,7 @@ function startQQLoginStatusAutoRefresh() {
 }
 
 function normalizeKugouLoginStatus(info) {
-  var fallback = { provider: 'kugou', loggedIn: false, preview: false, nickname: '酷狗音乐', userId: '', avatar: '', vipType: 0, svipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, playbackKeyReady: false };
+  var fallback = { provider: 'kugou', loggedIn: false, preview: false, nickname: '酷狗音乐', userId: '', avatar: '', vipType: 0, svipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, reauthRequired: false, sessionExpired: false, playbackKeyReady: false };
   var normalizedLevel = info && info.loggedIn ? providerVipLevel('kugou', info) : (info && (info.vipLevel || info.vip_level) || 'none');
   if (!info || !info.loggedIn) return Object.assign({}, fallback, info || {}, {
     provider: 'kugou',
@@ -298,12 +306,14 @@ function normalizeKugouLoginStatus(info) {
     vipLevel: normalizedLevel,
     isVip: normalizedLevel !== 'none' || !!(info && info.isVip),
     isSvip: normalizedLevel === 'svip' || !!(info && info.isSvip),
-    stale: !!(info && info.stale),
+    stale: !!(info && (info.stale || info.sessionExpired || info.reauthRequired)),
+    reauthRequired: !!(info && info.reauthRequired),
+    sessionExpired: !!(info && info.sessionExpired),
     playbackKeyReady: !!(info && (info.playbackReady || info.playbackKeyReady))
   });
   return Object.assign({}, fallback, info, {
     provider: 'kugou',
-    loggedIn: true,
+    loggedIn: !(info && info.sessionExpired),
     nickname: info.nickname || fallback.nickname,
     userId: info.userId || info.userid || '',
     avatar: info.avatar || '',
@@ -313,7 +323,9 @@ function normalizeKugouLoginStatus(info) {
     isVip: normalizedLevel !== 'none' || !!info.isVip,
     isSvip: normalizedLevel === 'svip' || !!info.isSvip,
     playbackKeyReady: !!(info.playbackReady || info.playbackKeyReady),
-    stale: !!info.stale
+    stale: !!info.stale || !!(info.sessionExpired) || !!(info.reauthRequired),
+    reauthRequired: !!(info.reauthRequired),
+    sessionExpired: !!(info.sessionExpired)
   });
 }
 function applyKugouPlaybackStatusEvidence(info) {
@@ -352,10 +364,18 @@ async function refreshKugouLoginStatus() {
   try {
     var info = await apiJson('/api/kugou/login/status?t=' + Date.now());
     var prevLogged = !!kugouLoginStatus.loggedIn;
+    if (info && info.loggedIn && kugouSessionInvalidated) {
+      // 歌单同步已确认会话失效：login/status 只证明 cookie 文件还在，
+      // 不代表酷狗服务端会话有效。保持"已失效"直到用户重新登录成功，
+      // 避免 45s 自动刷新把状态又刷回"已登录"导致歌单同步反复失败。
+      info = Object.assign({}, info, { loggedIn: false, stale: true, reauthRequired: true, sessionExpired: true });
+    }
     kugouLoginStatus = normalizeKugouLoginStatus(info);
     auditProviderVipState('kugou', kugouLoginStatus);
     if (!kugouLoginStatus.loggedIn) {
-      if (prevLogged || kugouLoginWasLoggedIn) showToast(kugouLoginStatus.stale ? '酷狗音乐登录已失效' : '酷狗音乐已掉登录');
+      if (kugouLoginStatus.sessionExpired || kugouLoginStatus.reauthRequired) {
+        if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); }
+      } else if (prevLogged || kugouLoginWasLoggedIn) showToast(kugouLoginStatus.stale ? '酷狗音乐登录已失效' : '酷狗音乐已掉登录');
       kugouPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'kugou'; });
       playlistCatalogRevision += 1;
@@ -374,6 +394,7 @@ async function refreshKugouLoginStatus() {
     } else if (kugouLoginStatus.stale) {
       showToast('酷狗音乐登录状态可能已失效');
     }
+    if (kugouLoginStatus.loggedIn) kugouSessionExpiredNotified = false;
     kugouLoginWasLoggedIn = !!kugouLoginStatus.loggedIn;
     if (!hasPlatformLogin(activeAccountProvider)) activeAccountProvider = firstLoggedProvider();
     renderUserBtn();
@@ -384,6 +405,26 @@ async function refreshKugouLoginStatus() {
     renderUserBtn();
     return kugouLoginStatus;
   }
+}
+// 酷狗歌单同步被平台明确判为"会话失效"（reauthRequired，如 20017）时调用：
+// 立即把登录状态标记为失效并提示重新登录，避免"显示已登录但歌单为空"
+// 的静默失败（用户只能靠手动重新登录才能恢复同步）。
+function markKugouSessionExpired() {
+  if (!kugouLoginStatus || !kugouLoginStatus.loggedIn) return;
+  kugouSessionInvalidated = true;
+  kugouLoginStatus = normalizeKugouLoginStatus(Object.assign({}, kugouLoginStatus, {
+    loggedIn: false,
+    stale: true,
+    reauthRequired: true,
+    sessionExpired: true,
+    playbackKeyReady: false,
+  }));
+  kugouLoginWasLoggedIn = false;
+  kugouPlaylists = [];
+  userPlaylists = userPlaylists.filter(function (pl) { return pl && pl.provider !== 'kugou'; });
+  playlistCatalogRevision += 1;
+  renderUserBtn();
+  if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); }
 }
 function startKugouLoginStatusAutoRefresh() {
   if (kugouLoginAutoRefreshTimer) clearInterval(kugouLoginAutoRefreshTimer);
@@ -403,14 +444,17 @@ function startKugouLoginStatusAutoRefresh() {
 }
 
 function normalizeQishuiLoginStatus(info) {
-  var fallback = { provider: 'qishui', loggedIn: false, configured: false, oauthConfigured: false, oauthMissing: [], preview: false, nickname: '汽水音乐', userId: '', avatar: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, playbackKeyReady: false, playbackMode: 'recommend-match', searchReady: false, publicCatalog: false };
+  var fallback = { provider: 'qishui', loggedIn: false, configured: false, oauthConfigured: false, oauthMissing: [], preview: false, nickname: '汽水音乐', userId: '', avatar: '', vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, stale: false, sessionExpired: false, playbackKeyReady: false, playbackMode: 'recommend-match', searchReady: false, publicCatalog: false };
   var configured = !!(info && (info.configured || info.loggedIn));
   var webSession = !!(info && info.webSession);
+  var sessionExpired = !!(info && info.sessionExpired);
   var capabilities = info && info.capabilities || {};
   var searchReady = !!(configured || capabilities.search || info && info.publicCatalog);
   return Object.assign({}, fallback, info || {}, {
     provider: 'qishui',
-    loggedIn: configured,
+    // 服务端确认会话失效（PC 接口 401/403）时按掉登录处理：否则前端会
+    // 一直显示已登录、歌单同步却永远失败（见服务端 handleQishuiStatus）。
+    loggedIn: sessionExpired ? false : configured,
     configured: configured,
     oauthConfigured: !!(info && (info.oauthConfigured || (info.oauth && info.oauth.configured))),
     oauthMissing: info && Array.isArray(info.oauthMissing) ? info.oauthMissing : [],
@@ -421,14 +465,15 @@ function normalizeQishuiLoginStatus(info) {
     vipLevel: info && (info.vipLevel || info.vip_level) || 'none',
     isVip: !!(info && info.isVip),
     isSvip: !!(info && info.isSvip),
-    playbackKeyReady: !!(webSession && capabilities.playableUrl),
+    playbackKeyReady: !!(!sessionExpired && webSession && capabilities.playableUrl),
     playbackMode: info && info.playbackMode || 'recommend-match',
     searchReady: searchReady,
     webSession: webSession,
-    cookieReady: !!(info && info.cookieReady),
+    cookieReady: !!(!sessionExpired && info && info.cookieReady),
     tokenConfigured: !!(info && info.tokenConfigured),
     publicCatalog: !!(!configured && searchReady),
-    stale: false
+    stale: !!(info && (info.stale || sessionExpired)),
+    sessionExpired: sessionExpired
   });
 }
 async function refreshQishuiLoginStatus() {
@@ -438,7 +483,9 @@ async function refreshQishuiLoginStatus() {
     qishuiLoginStatus = normalizeQishuiLoginStatus(info);
     auditProviderVipState('qishui', qishuiLoginStatus);
     if (!qishuiLoginStatus.loggedIn) {
-      if (prevLogged || qishuiLoginWasLoggedIn) showToast('汽水音乐授权已清除');
+      if (qishuiLoginStatus.sessionExpired) {
+        if (!qishuiSessionExpiredNotified) { qishuiSessionExpiredNotified = true; showToast('汽水音乐登录已失效，请重新登录'); }
+      } else if (prevLogged || qishuiLoginWasLoggedIn) showToast('汽水音乐授权已清除');
       qishuiPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qishui'; });
       playlistCatalogRevision += 1;
@@ -449,6 +496,7 @@ async function refreshQishuiLoginStatus() {
       refreshUserPlaylists(true);
       loadHomeDiscover(true);
     }
+    if (qishuiLoginStatus.loggedIn) qishuiSessionExpiredNotified = false;
     qishuiLoginWasLoggedIn = !!qishuiLoginStatus.loggedIn;
     if (!hasPlatformLogin(activeAccountProvider)) activeAccountProvider = firstLoggedProvider();
     renderUserBtn();

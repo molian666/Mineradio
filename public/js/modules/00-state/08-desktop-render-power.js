@@ -485,6 +485,21 @@ function updateDesktopRuntimeState(state) {
   if (wasDeep && !isDeepBackgroundMode()) recoverVisualsAfterBackground('desktop-runtime-state');
   if (desktopRuntimeState.fullscreen !== wasFullscreen) scheduleMainRendererViewportRefresh('desktop-runtime-state');
 }
+// 窗口恢复时，主进程通过 IPC 推送的窗口状态可能因渲染进程处于缺页恢复
+// （最小化时被 EmptyWorkingSet 打击）而滞后；浏览器可见性则由 Chromium
+// 直接驱动、不依赖该 IPC。只要文档实际可见，就以浏览器状态为准强制退出
+// 深度后台模式并恢复渲染，避免窗口已恢复但画面仍冻结（表现为窗口消失、
+// 点任务栏没反应，只有再点任务栏缩略图/激活窗口才恢复）。
+function forceRecoverFromStaleBackgroundState(reason) {
+  var visibleNow = typeof document !== 'undefined' && document.visibilityState === 'visible';
+  if (visibleNow && (desktopRuntimeState.minimized || desktopRuntimeState.visible === false)) {
+    desktopRuntimeState.minimized = false;
+    desktopRuntimeState.visible = true;
+    updateRenderPowerClasses();
+  }
+  applyRendererPowerMode();
+  if (!isDeepBackgroundMode()) recoverVisualsAfterBackground(reason || 'visibility');
+}
 function installRenderPowerHooks() {
   updateRenderPowerClasses();
   if (window.desktopWindow && typeof window.desktopWindow.getGpuDiagnostics === 'function') {
@@ -496,15 +511,11 @@ function installRenderPowerHooks() {
     });
   }
   document.addEventListener('visibilitychange', function () {
-    updateRenderPowerClasses();
-    applyRendererPowerMode();
-    if (!isDeepBackgroundMode()) recoverVisualsAfterBackground('visibilitychange');
+    forceRecoverFromStaleBackgroundState('visibilitychange');
   });
   window.addEventListener('focus', function () {
     desktopRuntimeState.focused = true;
-    updateRenderPowerClasses();
-    applyRendererPowerMode();
-    if (!isDeepBackgroundMode()) recoverVisualsAfterBackground('focus');
+    forceRecoverFromStaleBackgroundState('focus');
   });
   window.addEventListener('blur', function () {
     desktopRuntimeState.focused = false;

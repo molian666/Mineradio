@@ -185,6 +185,23 @@ renderer.domElement.style.height = '100%';
 renderer.domElement.tabIndex = 0;
 document.getElementById('canvas-container').appendChild(renderer.domElement);
 
+// WebGL 上下文丢失（GPU 进程崩溃/驱动超时）后 Three.js 场景的 GPU 资源
+// 无法原地重建，画面会永久冻结（透明窗口表现为“消失”）。上报主进程，由
+// 主进程强制终止渲染进程并走统一恢复管线重载页面。
+(function installWebglContextLostGuard() {
+  var canvas = renderer.domElement;
+  if (!canvas || typeof canvas.addEventListener !== 'function') return;
+  window.__mineradioWebglContextLostReported = false;
+  canvas.addEventListener('webglcontextlost', function (event) {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    if (window.__mineradioWebglContextLostReported) return;
+    window.__mineradioWebglContextLostReported = true;
+    if (window.desktopWindow && typeof window.desktopWindow.notifyRendererWebglContextLost === 'function') {
+      window.desktopWindow.notifyRendererWebglContextLost({ at: Date.now() });
+    }
+  }, false);
+})();
+
 // ============================================================
 //  相机系统 v7.1 — 分离 user offset / cinema offset
 //   - userOrbit: 用户拖拽的目标 (永久保留, 不会被电影模式覆盖)

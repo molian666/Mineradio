@@ -1566,7 +1566,7 @@ function checkQishuiProviderGuard() {
   if (!/\/api\/qishui\/user\/playlists/.test(serverText) || !/\/api\/qishui\/playlist\/tracks/.test(serverText)) {
     fail('server.js must route Qishui user playlists and playlist track detail endpoints');
   }
-  if (!/qishuiPlaylists/.test(coreStoreText) || !/if \(provider === 'qishui'\) return '\/api\/qishui\/user\/playlists'/.test(playlistShellText) || !/neteasePlaylists\.concat\(qqPlaylists, kugouPlaylists, qishuiPlaylists, spotifyPlaylists\)/.test(playlistShellText)) {
+  if (!/qishuiPlaylists/.test(coreStoreText) || !/if \(provider === 'qishui'\) return '\/api\/qishui\/user\/playlists'/.test(playlistShellText) || !/\(?neteasePlaylists(?:\s*\|\|\s*\[\])?\)?\.concat\(\s*qqPlaylists(?:\s*\|\|\s*\[\])?,\s*kugouPlaylists(?:\s*\|\|\s*\[\])?,\s*qishuiPlaylists(?:\s*\|\|\s*\[\])?,\s*spotifyPlaylists(?:\s*\|\|\s*\[\])?\s*\)/.test(playlistShellText)) {
     fail('playlist panel refresh must merge Qishui playlists with the other providers');
   }
   if (!/normalizePlaylistProvider/.test(playlistDetailText) || !/\/api\/qishui\/playlist\/tracks/.test(playlistDetailText) || !/qishui:' \+ id/.test(playlistDetailText) || !/汽水音乐歌单/.test(playlistDetailText)) {
@@ -2458,7 +2458,7 @@ function checkQQVipStatusSyncGuard() {
   }
   if (!/async function fetchQQVipStatus[\s\S]{0,220}const musicKey = qqCookiePlaybackKey\(cookieObj\)/.test(serverText) ||
       !/async function handleQQSongUrl[\s\S]{0,500}const playbackKey = qqCookiePlaybackKey\(cookieObj\);\s*const musicKey = playbackKey;/.test(serverText) ||
-      !/if \(!qqCookieUin\(obj\) \|\| !qqCookiePlaybackKey\(obj\)\)/.test(serverText) ||
+      !/const hasUin = !!qqCookieUin\(obj\)[\s\S]{0,140}const hasPlaybackKey = !!qqCookiePlaybackKey\(obj\)[\s\S]{0,160}if \(!hasUin \|\| !hasPlaybackKey\)/.test(serverText) ||
       !/function qqCookieUin[\s\S]{0,180}!!obj\.wxopenid[\s\S]{0,180}obj\.wxuin/.test(serverText)) {
     fail('QQ VIP and vkey requests must use a strict QQ Music playback key and must not persist p_skey-only sessions');
   }
@@ -2655,6 +2655,17 @@ async function checkProviderAuthCookiePathGuard() {
     QQ_LIKED_DIRID: 201,
     QQ_LIKED_PLAYLIST_NAME: 'Liked',
     QQ_LIKED_PLAYLIST_COVER: 'fallback-cover',
+    // 截取的代码段引用 createBoundedTtlCache（真实环境来自
+    // ./server/runtime-bounded-cache）；沙箱注入一个 Map 桩即可。
+    createBoundedTtlCache: (opts) => {
+      const map = new Map();
+      return {
+        get: key => map.get(key),
+        set: (key, value) => { map.set(key, value); },
+        delete: key => map.delete(key),
+        clear: () => map.clear(),
+      };
+    },
     Map,
     String,
     Math,
@@ -5186,6 +5197,9 @@ async function checkLargePlaylistVirtualizationGuard() {
     window: { innerHeight: 900 },
     songCoverSrc: () => '',
     escHtml: value => String(value == null ? '' : value),
+    // playlistPanelDetailRowsHtml 会调用行操作按钮渲染；该段不在截取范围内，
+    // 且下方断言只关心虚拟行索引与 spacer 数量，注入空实现即可。
+    detailPlaylistRowActionsHtml: () => '',
     Math,
     Number,
     String
@@ -5208,6 +5222,7 @@ async function checkLargePlaylistVirtualizationGuard() {
     normalizePlaylistProvider: provider => ['qq', 'kugou', 'qishui', 'spotify'].includes(provider) ? provider : 'netease',
     playlistCardPriority: () => 1,
     playlistPanelKey: (provider, id) => provider + ':' + id,
+    MERGED_PLAYLIST_PROVIDER: 'merged',
     window: { innerHeight: 900 },
     Math,
     Number
@@ -5234,6 +5249,7 @@ async function checkLargePlaylistVirtualizationGuard() {
     PLAYLIST_QUEUE_BACKGROUND_BATCH_SIZE: 160,
     PLAYLIST_QUEUE_PLAYBACK_AHEAD_THRESHOLD: 96,
     playlistTracksEndpoint: (provider, id, params) => `${provider}:${id}?offset=${params.offset}&limit=${params.limit}`,
+    MERGED_PLAYLIST_PROVIDER: 'merged',
     apiJson: async url => {
       const offset = Number((url.match(/offset=(\d+)/) || [])[1]) || 0;
       const limit = Number((url.match(/limit=(\d+)/) || [])[1]) || 0;
