@@ -185,7 +185,6 @@ var fxDefaults = {
   memoryAutoTrimApp: true,
   memoryAutoTrimOnBackground: true,
   memoryAutoSystemTrim: true,
-  memorySystemAutoElevate: true,
   memorySystemIntervalMin: 30,
   memorySystemThresholdPercent: 78,
   memorySystemMask: 29,

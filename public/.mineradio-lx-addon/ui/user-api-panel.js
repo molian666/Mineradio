@@ -47,7 +47,7 @@
       var status = active ? '已启用' : (source.status || '已导入');
       return '<div class="cs-card" data-source-id="' + esc(source.sourceId) + '">' +
         '<span class="cs-card-dot' + (active ? ' active' : '') + '"></span><div class="cs-card-content"><div class="cs-card-title"><strong>' + esc(sourceLabel(source)) + '</strong><span class="cs-status-pill' + (active ? ' active' : '') + '">' + esc(status) + '</span></div><small>' + esc(active ? 'Runtime providers: ' + providers : '等待启用') + '</small></div>' +
-        '<div class="cs-card-actions"><button class="cs-btn" type="button" data-action="activate" ' + (active || state.loading ? 'disabled' : '') + '>启用</button><button class="cs-btn" type="button" data-action="remove" ' + (state.loading ? 'disabled' : '') + '>移除</button></div>' +
+        '<div class="cs-card-actions"><button class="cs-btn" type="button" data-action="activate" ' + (active || state.loading ? 'disabled' : '') + '>启用</button><button class="cs-btn" type="button" data-action="test" ' + (state.loading ? 'disabled' : '') + '>测试</button><button class="cs-btn" type="button" data-action="remove" ' + (state.loading ? 'disabled' : '') + '>移除</button></div>' +
         '</div>';
     }).join('');
   }
@@ -162,7 +162,8 @@
         api().pickSourceFile().then(function (picked) {
           if (!picked || picked.canceled) return;
           if (!picked.ok) throw new Error(picked.error || '文件读取失败');
-          var label = state.form.label || String(picked.name || '').replace(/\.js$/i, '');
+          // 用户填的"显示名称" > 脚本自身声明的名称 > 文件名
+          var label = state.form.label || picked.detectedName || String(picked.name || '').replace(/\.js$/i, '');
           importText(picked.text, label);
         }).catch(function (error) { setFeedback('error', importErrorMessage(error)); render(); });
       });
@@ -188,6 +189,28 @@
         state.loading = true;
         render();
         api().activateSource(button.closest('[data-source-id]').dataset.sourceId).then(refresh).catch(function (error) { state.loading = false; setFeedback('error', '歌源启用失败：' + String(error && error.message || error || '未知错误')); render(); });
+      });
+    });
+    root.querySelectorAll('[data-action="test"]').forEach(function (button) {
+      button.addEventListener('click', function () {
+        state.loading = true;
+        setFeedback('info', '正在测试歌源...');
+        render();
+        api().testSource(button.closest('[data-source-id]').dataset.sourceId).then(function (result) {
+          state.loading = false;
+          if (!result || typeof result !== 'object') {
+            setFeedback('info', '歌源测试完成（无结果）');
+            render();
+            return;
+          }
+          var kind = !result.ok ? 'error' : (result.verified ? 'success' : 'info');
+          setFeedback(kind, result.summary || (result.ok ? '歌源正常' : '歌源测试未通过'));
+          render();
+        }).catch(function (error) {
+          state.loading = false;
+          setFeedback('error', '歌源测试失败：' + String(error && error.message || error || '未知错误'));
+          render();
+        });
       });
     });
     root.querySelectorAll('[data-action="remove"]').forEach(function (button) {

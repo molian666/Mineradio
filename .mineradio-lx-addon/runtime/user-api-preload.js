@@ -8,10 +8,12 @@ const EVENT_NAMES = Object.freeze({ inited: 'inited', request: 'request', update
 let requestSequence = 0;
 let initedSent = false;
 let updateAlertSent = false;
+let scriptGeneration = 0;
 
 function currentScriptInfo() {
   const info = ipcRenderer.sendSync('mineradio-lx-user-api-script-info');
   if (!info || typeof info !== 'object') return { name: '', description: '', version: '', author: '', homepage: '', rawScript: '' };
+  scriptGeneration = Number(info.generation) || 0;
   return {
     name: String(info.name || ''),
     description: String(info.description || ''),
@@ -32,7 +34,7 @@ function aesEncrypt(buffer, mode, key, iv) {
 
 function sourceRequest(url, options, callback) {
   const requestId = `source:${++requestSequence}`;
-  const promise = ipcRenderer.invoke('mineradio-lx-user-api-request', { url, options, requestId }).then(value => {
+  const promise = ipcRenderer.invoke('mineradio-lx-user-api-request', { url, options, requestId, generation: scriptGeneration }).then(value => {
     if (!value || typeof value !== 'object') {
       console.warn('[UserApiRequest] response', url, 'non-object');
       return value;

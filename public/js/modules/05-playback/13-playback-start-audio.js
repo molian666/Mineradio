@@ -45,11 +45,39 @@ function mineradioLxResolveImportedSong(song, quality) {
   function warnProviderFailure(provider, error) {
     if (error && error.message) console.warn('[Mineradio-LX UserApi] imported playback ' + provider + ' unavailable:', error.message);
   }
+  // 源脚本解析可能很慢（VIP 源无响应时内部会等满 20s 超时），主进程里对音频
+  // 候选的探测现在也有 10s 上限。这里再给每次解析和整个导入阶段加上限，避免
+  // 播放器一直转圈"加载好久"——超时后立刻走内置音源通道。
+  var IMPORT_RESOLVE_ATTEMPT_BUDGET_MS = 9000;
+  var IMPORT_RESOLVE_TOTAL_BUDGET_MS = 12000;
+  function lxResolveAttempt(factory, timeoutMs) {
+    timeoutMs = Math.max(1500, Number(timeoutMs) || IMPORT_RESOLVE_ATTEMPT_BUDGET_MS);
+    return new Promise(function (resolve, reject) {
+      var timer = null;
+      var settled = false;
+      function finish(fn, value) {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        fn(value);
+      }
+      timer = setTimeout(function () {
+        var err = new Error('Mineradio-LX UserApi resolve timed out');
+        err.code = 'USER_API_RESOLVE_TIMEOUT';
+        finish(reject, err);
+      }, timeoutMs);
+      Promise.resolve().then(factory).then(function (value) { finish(resolve, value); }, function (error) { finish(reject, error); });
+    });
+  }
   return (async function () {
     var originalProvider = providerKeyForSong(song);
     var originalLxProviderKey = providerToLxKey[originalProvider];
+    var importDeadline = Date.now() + IMPORT_RESOLVE_TOTAL_BUDGET_MS;
+    var remainingBudget = function () { return Math.max(1500, importDeadline - Date.now()); };
     try {
-      var originalResult = await window.mineradioUserApi.resolveSongUrl(song, requestedQuality, { provider: originalLxProviderKey });
+      var originalResult = await lxResolveAttempt(function () {
+        return window.mineradioUserApi.resolveSongUrl(song, requestedQuality, { provider: originalLxProviderKey });
+      }, remainingBudget());
       if (hasUrl(originalResult)) return originalResult;
     } catch (error) {
       warnProviderFailure(originalProvider, error);
@@ -57,6 +85,7 @@ function mineradioLxResolveImportedSong(song, quality) {
     var providers = remainingProviders(originalProvider);
     var matches = {};
     for (var searchIndex = 0; searchIndex < providers.length; searchIndex += 1) {
+      if (Date.now() >= importDeadline) break;
       var provider = providers[searchIndex];
       try {
         var match = await findControlSourceMatchResult(song, provider);
@@ -66,13 +95,16 @@ function mineradioLxResolveImportedSong(song, quality) {
       }
     }
     for (var resolveIndex = 0; resolveIndex < providers.length; resolveIndex += 1) {
+      if (Date.now() >= importDeadline) break;
       var candidateProvider = providers[resolveIndex];
       var matchedSong = matches[candidateProvider];
       if (!matchedSong) continue;
       var candidate = candidateSongForProvider(song, candidateProvider, matchedSong);
       var lxProviderKey = providerToLxKey[candidateProvider];
       try {
-        var candidateResult = await window.mineradioUserApi.resolveSongUrl(candidate, requestedQuality, { provider: lxProviderKey });
+        var candidateResult = await lxResolveAttempt(function () {
+          return window.mineradioUserApi.resolveSongUrl(candidate, requestedQuality, { provider: lxProviderKey });
+        }, remainingBudget());
         if (hasUrl(candidateResult)) return candidateResult;
       } catch (error) {
         warnProviderFailure(candidateProvider, error);

@@ -9,6 +9,7 @@ const path = require('node:path');
 const { createUserApiWindow } = require('./user-api-window');
 const { normalizeSongForLx, resolveLxSourceResponse } = require('./source-adapter');
 const { validateAudioCandidate, clearValidationCache } = require('./playback-integrity');
+const { detectSourceName, GENERIC_SOURCE_NAMES } = require('./user-api-store');
 
 const EVENT_NAMES = Object.freeze({ inited: 'inited', request: 'request', updateAlert: 'updateAlert' });
 const MAX_SOURCE_SIZE = 1024 * 1024;
@@ -197,13 +198,24 @@ function readUserApiSourceFile(filePath) {
   const absolute = path.resolve(filePath);
   const raw = fs.readFileSync(absolute);
   if (raw.length > MAX_SOURCE_SIZE) throw new Error('UserApi source file exceeds size limit');
-  return { name: path.basename(absolute), text: raw.toString('utf8').replace(/^\uFEFF/, '') };
+  const text = raw.toString('utf8').replace(/^\uFEFF/, '');
+  return {
+    name: path.basename(absolute),
+    text,
+    // 优先用脚本自身声明的名称，其次才是文件名
+    detectedName: detectSourceName(text) || path.basename(absolute).replace(/\.js$/i, '').trim() || path.basename(absolute),
+  };
 }
 
 function sourceNameFromUrl(url) {
   try {
     const target = new URL(url);
-    const leaf = decodeURIComponent(target.pathname.split('/').filter(Boolean).pop() || '').replace(/\.js$/i, '').trim();
+    const segments = target.pathname.split('/').filter(Boolean);
+    let leaf = decodeURIComponent(segments.pop() || '').replace(/\.js$/i, '').trim();
+    // "latest.js"/"index.js" 之类的通用分发型文件名不是歌源名字，回退到上一段
+    if (!leaf || GENERIC_SOURCE_NAMES.has(leaf.toLowerCase())) {
+      leaf = decodeURIComponent(segments.pop() || '').replace(/\.js$/i, '').trim();
+    }
     return (leaf || target.hostname || 'UserApi 歌源').slice(0, 80);
   } catch (_) {
     return 'UserApi 歌源';
@@ -462,6 +474,156 @@ async function requestUserApiSongUrl(song, quality, session, options = {}, depen
   throw lastError || new Error('UserApi source did not return a playable URL');
 }
 
+// ====================================================================
+// 音源测试：加载/初始化校验 + 真实搜索/取链/可播性探测
+// ====================================================================
+const USER_API_TEST_BUDGET_MS = 25000;
+const USER_API_TEST_QUERIES = [
+  { name: '晴天', artist: '周杰伦' },
+  { name: '光年之外', artist: '邓紫棋' },
+];
+
+function actionHas(actions, type) {
+  return Array.isArray(actions) && actions.some(action =>
+    typeof action === 'string' ? action === type : !!(action && action.type === type)
+  );
+}
+
+function resolveRequestSession(request, sessions, activeSession) {
+  const generation = request && request.generation;
+  if (generation != null) {
+    for (const session of sessions || []) {
+      if (session && !session.disposed && session.generation === Number(generation)) return session;
+    }
+  }
+  return activeSession || null;
+}
+
+function sourceProviderLabel(key) {
+  return ({ wy: '网易云', tx: 'QQ 音乐', kg: '酷狗', kw: '酷我' })[String(key || '')] || String(key || '未知');
+}
+
+function pickTestSongFromSearch(songs) {
+  const candidates = Array.isArray(songs)
+    ? songs.filter(song => song && (song.songmid || song.songId || song.hash || song.musicrid || song.music_id || song.id))
+    : [];
+  if (!candidates.length) return null;
+  for (const query of USER_API_TEST_QUERIES) {
+    const expectedName = comparableText(query.name);
+    const byName = candidates.find(song => comparableText(song.name || song.title || '') === expectedName)
+      || candidates.find(song => comparableText(song.name || song.title || '').includes(expectedName));
+    if (byName) return byName;
+  }
+  return candidates[0];
+}
+
+// 探测一个音源是否还能正常使用：
+// - 源脚本能完成初始化（inited）并声明 musicUrl 动作；
+// - 优先用源自己的 search 动作查一首知名测试曲，再用 musicUrl 取真实播放地址；
+// - 对返回的地址做有界可播性探测（不会下载整首歌）。
+async function runUserApiSourceProbe(session, options = {}) {
+  const deadline = Number(options.deadline) > 0 ? Number(options.deadline) : Date.now() + USER_API_TEST_BUDGET_MS;
+  const entries = sourceEntries(session && session.inited && session.inited.sources).filter(entry => actionHas(entry.actions, 'musicUrl'));
+  if (!entries.length) {
+    const diagnostic = session && session.lastWindowDiagnostic ? `（脚本诊断: ${session.lastWindowDiagnostic}）` : '';
+    return {
+      ok: false,
+      verified: false,
+      summary: `源未完成初始化或未声明播放动作（musicUrl）${diagnostic}`,
+      checks: [],
+    };
+  }
+  const checks = [];
+  let firstOk = null;
+  for (const entry of entries) {
+    if (Date.now() >= deadline) {
+      checks.push({ provider: String(entry.source || '').trim(), skipped: true, note: '测试超时' });
+      break;
+    }
+    try {
+      const provider = String(entry.source || '').trim();
+      const qualitys = Array.isArray(entry.qualitys) && entry.qualitys.length ? entry.qualitys : ['128k', '320k'];
+      const quality = qualitys.includes('320k') ? '320k' : qualitys[0] || '128k';
+      let testSong = null;
+      if (actionHas(entry.actions, 'search')) {
+        let searchResponse = null;
+        for (const query of USER_API_TEST_QUERIES) {
+          searchResponse = await invokeSourceRequest(session, {
+            source: provider,
+            action: 'search',
+            info: { type: 'song', page: 1, limit: 5, musicInfo: { songmid: '', name: query.name, artist: query.artist } },
+          });
+          const payload = searchResponse && searchResponse.body && typeof searchResponse.body === 'object' ? searchResponse.body : searchResponse;
+          const songs = payload && (Array.isArray(payload.songs) ? payload.songs : (Array.isArray(payload.result) ? payload.result : []));
+          testSong = pickTestSongFromSearch(songs);
+          if (testSong) break;
+        }
+        if (!testSong) throw new Error('搜索测试曲目无结果');
+      } else {
+        checks.push({ provider, skipped: true, note: '该源未提供 search 动作，跳过播放验证（仅验证初始化）' });
+        continue;
+      }
+      const musicInfo = normalizeSongForLx({ ...testSong, provider }, provider, quality);
+      const response = await invokeSourceRequest(session, {
+        source: provider,
+        action: 'musicUrl',
+        info: { type: quality, musicInfo },
+      });
+      const resolved = await resolveLxSourceResponse(response, {
+        request: (url, requestOptions) => requestUserApi({ url, options: requestOptions, generation: session.generation }, session),
+      });
+      if (!resolved || !resolved.url) throw new Error('源未返回播放地址');
+      let validation = null;
+      try {
+        validation = await validateAudioCandidate({
+          ...resolved,
+          upstreamUrl: resolved.url,
+          sourceId: session.sourceId,
+          generation: session.generation,
+          songKey: 'user-api-source-test',
+          expectedDurationSec: durationForSong(testSong) || null,
+          quality,
+        }, { expectedDurationSec: durationForSong(testSong) || null, quality });
+      } catch (error) {
+        throw new Error('返回的播放地址不可达: ' + ((error && error.message) || error));
+      }
+      const result = {
+        provider,
+        quality,
+        level: resolved.level || quality,
+        url: resolved.url,
+        completeness: validation ? validation.completeness : 'unknown',
+        durationSec: validation && validation.durationSec ? Math.round(validation.durationSec) : null,
+        ok: true,
+        note: validation && validation.completeness === 'full'
+          ? ''
+          : (validation && validation.reason ? ('播放地址已返回，但未能确认完整时长: ' + validation.reason) : '播放地址已返回'),
+      };
+      checks.push(result);
+      if (!firstOk) firstOk = result;
+      if (validation && validation.completeness === 'full') break;
+    } catch (error) {
+      checks.push({ provider: String(entry.source || '').trim(), ok: false, error: (error && error.message) || String(error) });
+    }
+  }
+  const passed = checks.filter(check => check.ok);
+  const failed = checks.filter(check => check.ok === false);
+  const skipped = checks.filter(check => check.skipped);
+  const ok = passed.length > 0 || (skipped.length > 0 && failed.length === 0);
+  let summary;
+  if (passed.length > 0) {
+    const fullPlayable = passed.some(check => check.completeness === 'full');
+    summary = '歌源正常：' + sourceProviderLabel(firstOk.provider) + ' · ' + firstOk.quality
+      + (fullPlayable ? ' 可完整播放' : ' 可返回播放地址')
+      + (failed.length ? '；' + failed.map(check => sourceProviderLabel(check.provider) + ': ' + check.error).join('；') : '');
+  } else if (skipped.length && !failed.length) {
+    summary = '源加载正常，但未提供 search 动作，跳过播放验证（' + skipped.map(check => sourceProviderLabel(check.provider)).join('、') + '）';
+  } else {
+    summary = '歌源测试未通过：' + (failed.map(check => sourceProviderLabel(check.provider) + ': ' + (check.error || '失败')).join('；') || '未知原因');
+  }
+  return { ok, verified: ok && passed.some(check => check.completeness === 'full'), summary, checks };
+}
+
 function requestUserApi(request, session, redirectCount = 0) {
   const current = ensureSession(session);
   const generation = request.generation == null ? current.generation : request.generation;
@@ -625,7 +787,8 @@ async function loadUserApiSource(sourceText, sourceId, options = {}) {
   if (typeof options.BrowserWindow !== 'function') throw new Error('BrowserWindow is required for UserApi source execution');
   if (typeof options.ipcMain?.on !== 'function') throw new Error('ipcMain.on is required for UserApi source execution');
   const metadata = options.metadata && typeof options.metadata === 'object' ? options.metadata : {};
-  const session = { sourceId, generation: ++nextGeneration, sourceLength: Buffer.byteLength(sourceText, 'utf8'), currentScriptInfo: { name: metadata.name || sourceId, version: metadata.version || '', author: metadata.author || '', description: metadata.description || '', homepage: metadata.homepage || '', rawScript: sourceText }, controllers: new Set(), requestControllers: new Map(), disposed: false, inited: null, window: null, requestHandler: null, pendingRequests: new Map(), requestSequence: 0, ipcListeners: [], windowDiagnostics: [], lastWindowDiagnostic: '', ipcMain: options.ipcMain };
+  const generation = ++nextGeneration;
+  const session = { sourceId, generation, sourceLength: Buffer.byteLength(sourceText, 'utf8'), currentScriptInfo: { name: metadata.name || sourceId, version: metadata.version || '', author: metadata.author || '', description: metadata.description || '', homepage: metadata.homepage || '', rawScript: sourceText, generation }, controllers: new Set(), requestControllers: new Map(), disposed: false, inited: null, window: null, requestHandler: null, pendingRequests: new Map(), requestSequence: 0, ipcListeners: [], windowDiagnostics: [], lastWindowDiagnostic: '', ipcMain: options.ipcMain };
   sessions.add(session);
   if (typeof options.onSession === 'function') options.onSession(session);
   const inited = new Promise(resolve => { session.resolveInited = resolve; });
@@ -771,7 +934,9 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
   });
   ipcMain.handle('mineradio-lx-user-api-import-url', async (_event, url) => {
     const sourceText = await fetchUserApiSource(url);
-    return stateStore.addSource(sourceText, { name: sourceNameFromUrl(String(url || '')) });
+    // 优先用脚本自身声明的名称（export default 的 name / @name 头注释），
+    // 避免分发型 URL 统一命名为 "latest"；都拿不到时再退回 URL 文件名。
+    return stateStore.addSource(sourceText, { name: detectSourceName(sourceText) || sourceNameFromUrl(String(url || '')) });
   });
   ipcMain.handle('mineradio-lx-user-api-activate', async (_event, sourceId) => {
     explicitActivationRequested = true;
@@ -793,7 +958,14 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
       return stateStore.removeSource(sourceId);
     });
   });
-  ipcMain.handle('mineradio-lx-user-api-request', (_event, request) => { if (!activeSession) throw new Error('no active UserApi source'); return requestUserApi(request, activeSession); });
+  ipcMain.handle('mineradio-lx-user-api-request', (_event, request) => {
+    // 按 generation 路由到对应的源会话：测试会临时加载非活动源，其脚本内部的
+    // lx.request 必须回到测试会话而不是当前活动会话；老版本请求没有 generation
+    // 时回退到活动会话。
+    const session = resolveRequestSession(request, sessions, activeSession);
+    if (!session) throw new Error('no active UserApi source');
+    return requestUserApi(request, session);
+  });
   ipcMain.handle('mineradio-lx-user-api-cancel', (_event, requestId) => {
     const controller = activeSession?.requestControllers?.get?.(String(requestId));
     if (controller) controller.abort();
@@ -802,6 +974,29 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
   ipcMain.handle('mineradio-lx-user-api-resolve-song-url', (_event, song, quality, options) => { if (!activeSession) throw new Error('no active UserApi source'); return requestUserApiSongUrl(song, quality, activeSession, options); });
   ipcMain.handle('mineradio-lx-user-api-providers', () => require('./source-adapter').getAvailableLxProviders(activeSession?.inited?.sources || []));
   ipcMain.handle('mineradio-lx-user-api-state', () => stateStore.getState());
+  ipcMain.handle('mineradio-lx-user-api-test', async (_event, sourceId) => {
+    const normalizedId = String(sourceId || '');
+    const source = stateStore.getSource(normalizedId);
+    if (!source) throw new Error(`unknown UserApi source: ${normalizedId}`);
+    if (activeSession && activeSession.sourceId === normalizedId) {
+      // 已是活动源：直接在当前会话上测试，不打扰其它源
+      return runUserApiSourceProbe(activeSession);
+    }
+    // 非活动源：用独立会话加载测试，测试完立即释放，不影响当前活动源和播放。
+    const deadline = Date.now() + USER_API_TEST_BUDGET_MS;
+    const session = await loadUserApiSource(source.sourceText, source.sourceId, {
+      BrowserWindow,
+      ipcMain,
+      preloadPath,
+      userData: app?.getPath?.('userData'),
+      metadata: source.metadata,
+    });
+    try {
+      return await runUserApiSourceProbe(session, { deadline });
+    } finally {
+      await disposeUserApiSession(session);
+    }
+  });
   if (typeof app?.whenReady === 'function') {
     void app.whenReady().then(async () => {
       if (explicitActivationRequested) return;
@@ -818,7 +1013,7 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
       });
   }
   return {
-    channels: ['mineradio-lx-user-api-add', 'mineradio-lx-user-api-pick-file', 'mineradio-lx-user-api-import-url', 'mineradio-lx-user-api-activate', 'mineradio-lx-user-api-remove', 'mineradio-lx-user-api-resolve-song-url', 'mineradio-lx-user-api-state'],
+    channels: ['mineradio-lx-user-api-add', 'mineradio-lx-user-api-pick-file', 'mineradio-lx-user-api-import-url', 'mineradio-lx-user-api-activate', 'mineradio-lx-user-api-remove', 'mineradio-lx-user-api-resolve-song-url', 'mineradio-lx-user-api-test', 'mineradio-lx-user-api-state'],
     dispose: () => enqueueLifecycle(async () => {
       if (disposed) return;
       disposed = true;
@@ -830,4 +1025,4 @@ function registerUserApiIpc({ ipcMain, BrowserWindow, app, dialog, store, preloa
   };
 }
 
-module.exports = { loadUserApiSource, requestUserApi, requestUserApiSongUrl, invokeSourceRequest, disposeUserApiSession, registerUserApiIpc, fetchUserApiSource, readUserApiSourceFile, resolveUserApiStorePath, EVENT_NAMES };
+module.exports = { loadUserApiSource, requestUserApi, requestUserApiSongUrl, invokeSourceRequest, disposeUserApiSession, registerUserApiIpc, fetchUserApiSource, readUserApiSourceFile, resolveUserApiStorePath, runUserApiSourceProbe, resolveRequestSession, actionHas, EVENT_NAMES };

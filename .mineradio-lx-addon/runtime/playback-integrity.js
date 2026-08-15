@@ -4,6 +4,13 @@ const crypto = require('node:crypto');
 
 const validationCache = new Map();
 
+// 音频候选探测必须是有界的：VIP/付费曲目的直链通常很大，若上游忽略 Range
+// 请求并整体返回，无上限的 arrayBuffer() 会把整首歌下载完才继续，导致
+// "加载很久"；上游挂起时没有超时则永远卡住。这里用超时 + 字节上限 + 流式
+// 读取，保证单次探测最多下载 PROBE_MAX_BYTES 字节且不超过 PROBE_TIMEOUT_MS。
+const PROBE_TIMEOUT_MS = 10000;
+const PROBE_MAX_BYTES = 512 * 1024;
+
 function urlFingerprint(url) {
   return crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 16);
 }
@@ -112,20 +119,56 @@ function inferDurationSec(probe) {
 }
 
 async function fetchProbe(url, signal) {
-  const response = await fetch(url, { signal, headers: { Range: 'bytes=0-524287' } });
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const contentLength = Number(response.headers.get('content-length')) || null;
-  const contentRange = String(response.headers.get('content-range') || '');
-  const rangeTotal = /\/([0-9]+)$/.exec(contentRange);
-  return {
-    statusCode: response.status,
-    contentType: response.headers.get('content-type') || '',
-    magic: buffer.subarray(0, 16),
-    durationSec: Number(response.headers.get('x-audio-duration')) || null,
-    contentLength: rangeTotal ? Number(rangeTotal[1]) : contentLength,
-    bytes: buffer,
-    endedEarly: false
-  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+  try {
+    const response = await fetch(url, { signal: controller.signal, headers: { Range: 'bytes=0-' + (PROBE_MAX_BYTES - 1) } });
+    const contentType = response.headers.get('content-type') || '';
+    const contentRange = String(response.headers.get('content-range') || '');
+    const rangeTotal = /\/([0-9]+)$/.exec(contentRange);
+    const explicitLength = Number(response.headers.get('content-length')) || null;
+    const contentLength = rangeTotal ? Number(rangeTotal[1]) : explicitLength;
+    const chunks = [];
+    let total = 0;
+    if (response.body && typeof response.body.getReader === 'function') {
+      // 流式读取并尽早取消：即使上游忽略 Range 整体返回 200，
+      // 也只读取前 PROBE_MAX_BYTES 字节，避免整首歌被下载。
+      const reader = response.body.getReader();
+      try {
+        while (total < PROBE_MAX_BYTES) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.length) {
+            const take = Math.min(value.length, PROBE_MAX_BYTES - total);
+            chunks.push(value.subarray(0, take));
+            total += take;
+          }
+        }
+      } finally {
+        try { await reader.cancel(); } catch (_) {}
+      }
+    } else {
+      const buffer = Buffer.from(await response.arrayBuffer());
+      total = Math.min(buffer.length, PROBE_MAX_BYTES);
+      chunks.push(buffer.subarray(0, total));
+    }
+    const bytes = Buffer.concat(chunks, total);
+    return {
+      statusCode: response.status,
+      contentType,
+      magic: bytes.subarray(0, 16),
+      durationSec: Number(response.headers.get('x-audio-duration')) || null,
+      contentLength,
+      bytes,
+      endedEarly: false
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function resultFor(candidate, completeness, durationSec, reason, cacheKey) {

@@ -83,7 +83,6 @@ let memoryAutoState = {
   mask: systemMemory.MEMORY_MASK_DEFAULT,
   intervalMin: 30,
   thresholdPercent: 78,
-  autoElevate: false,
   lastRunAt: 0,
   lastReason: '',
   lastResult: null,
@@ -1976,7 +1975,6 @@ function normalizeMemoryAutoState(payload = {}) {
     mask: systemMemory.normalizeMask(payload.mask != null ? payload.mask : memoryAutoState.mask),
     intervalMin: Math.max(5, Math.min(180, Math.round(Number(payload.intervalMin != null ? payload.intervalMin : memoryAutoState.intervalMin) || 30))),
     thresholdPercent: Math.max(0, Math.min(100, Math.round(Number(payload.thresholdPercent != null ? payload.thresholdPercent : memoryAutoState.thresholdPercent) || 0))),
-    autoElevate: payload.autoElevate === true,
     lastRunAt: memoryAutoState.lastRunAt || 0,
     lastReason: memoryAutoState.lastReason || '',
     lastResult: memoryAutoState.lastResult || null,
@@ -2019,7 +2017,8 @@ async function runMemoryAutoTick(reason = 'auto') {
   memoryAutoState.lastReason = reason;
   try {
     const result = await systemMemory.purgeSystemMemorySmart(memoryAutoState.mask, {
-      autoElevate: memoryAutoState.autoElevate === true,
+      // 后台自动清理保持静默：绝不请求 UAC 提权。
+      autoElevate: false,
     });
     memoryAutoState.lastResult = result;
     memoryAutoState.lastError = '';
@@ -4083,7 +4082,7 @@ ipcMain.handle('mineradio-memory-purge-system', async (_event, payload = {}) => 
       ok: true,
       result,
       snapshot: await systemMemory.getMemorySnapshotExtended(),
-      elevated: elevatedBefore || await systemMemory.isProcessElevated(),
+      elevated: elevatedBefore,
       systemPurgeAvailable: systemMemory.SYSTEM_PURGE_AVAILABLE === true,
       systemPurgeEnabled: systemMemory.SYSTEM_PURGE_ENABLED === true,
     };

@@ -6963,7 +6963,9 @@ html.control-glass-svg-ok #play-btn {
 }
 
 #time-display {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 86px;
+  overflow: hidden;
   height: 36px;
   display: flex;
   align-items: center;
@@ -6972,7 +6974,6 @@ html.control-glass-svg-ok #play-btn {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.50);
   letter-spacing: .35px;
-  min-width: 86px;
   text-align: center;
   font-variant-numeric: tabular-nums
 }
@@ -7175,6 +7176,10 @@ body.diy-mode #controls {
 .control-cluster.modes {
   justify-content: flex-end;
   overflow: visible;
+  /* 底栏宽度封顶 1120px 后两侧列约 366px：若用默认 13px 间距，右侧簇
+     （6 按钮 + 时间显示）会超出列宽并把图标压向中轴 transport。9px 间距
+     让 6×36 按钮 + 86px 时间显示在任何宽屏上都能完整放下。 */
+  gap: 9px;
 }
 
 .control-track {
@@ -7279,6 +7284,56 @@ body.diy-mode #controls {
   .control-cluster.modes {
     justify-content: center;
     width: 100%;
+  }
+}
+
+/* ---------- 控制栏图标防重叠：中等/窄视口下左右簇不溢出到中轴 ----------
+   三列网格在 620-1180px 区间时，左右簇内容比列宽还宽，且 .modes/.actions
+   都是 overflow:visible，图标会直接压到中间的 transport 按钮上造成"排版错乱"。
+   这里按宽度分级隐藏次要按钮、收紧间距，保证中轴 transport 不被挤压。 */
+@media (max-width:1180px) {
+
+  #controls,
+  body.simple-mode #controls,
+  body.diy-mode #controls {
+    gap: clamp(8px, 1.2vw, 14px);
+  }
+
+  #time-display,
+  #cuefield-automix-btn {
+    display: none !important
+  }
+
+  .control-cluster.transport {
+    gap: clamp(8px, 1vw, 11px)
+  }
+}
+
+@media (max-width:960px) {
+
+  body:not(.immersive-mode) #desktop-lyrics-btn,
+  body:not(.immersive-mode) #immersive-btn {
+    display: none !important
+  }
+}
+
+@media (max-width:780px) {
+
+  #download-btn {
+    display: none !important
+  }
+}
+
+@media (max-width:720px) {
+
+  #controls-hide-btn,
+  #collect-btn,
+  #download-btn {
+    display: none !important
+  }
+
+  .control-cluster.modes {
+    gap: 4px
   }
 }
 

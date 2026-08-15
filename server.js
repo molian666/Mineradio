@@ -2983,6 +2983,13 @@ function rememberQishuiDecryptedAudio(key, payload) {
   qishuiAudioDecryptCache.set(key, payload);
 }
 
+// 汽水加密音频首次播放需要下载完整文件才能解密。若不加超时，CDN 挂起会让
+// /api/audio 永远不响应（"加载好久"）；若不去重，audio 元素在缓存未命中时
+// 会并发发出多个 Range 请求，每个都会触发一次整文件下载 + 解密（VIP 歌曲
+// 文件很大，重复下载非常慢）。这里合并并发请求，并给上游下载加超时上限。
+const QISHUI_DECRYPT_FETCH_TIMEOUT_MS = 30000;
+const qishuiAudioDecryptInFlight = new Map();
+
 async function getQishuiDecryptedAudio(audioUrl) {
   const parsed = qishuiAudioAuthFromUrl(audioUrl);
   if (!parsed.auth) return null;
@@ -2992,17 +2999,27 @@ async function getQishuiDecryptedAudio(audioUrl) {
     cached.at = Date.now();
     return cached;
   }
-  const up = await fetch(parsed.cleanUrl, { headers: audioProxyHeadersFor(parsed.cleanUrl, '') });
-  if (!up.ok) throw new Error('Qishui encrypted audio fetch failed: HTTP ' + up.status);
-  const encryptedBuffer = Buffer.from(await up.arrayBuffer());
-  const result = qishuiAudioDecryptor.decrypt({ encryptedBuffer, spadeA: parsed.auth });
-  const payload = {
-    buffer: result.buffer,
-    contentType: result.extension === '.flac' ? 'audio/flac' : 'audio/mp4',
-    extension: result.extension,
-  };
-  rememberQishuiDecryptedAudio(key, payload);
-  return payload;
+  const pending = qishuiAudioDecryptInFlight.get(key);
+  if (pending) return pending;
+  const task = (async () => {
+    const up = await fetchWithTimeout(parsed.cleanUrl, { headers: audioProxyHeadersFor(parsed.cleanUrl, '') }, QISHUI_DECRYPT_FETCH_TIMEOUT_MS);
+    if (!up.ok) throw new Error('Qishui encrypted audio fetch failed: HTTP ' + up.status);
+    const encryptedBuffer = Buffer.from(await up.arrayBuffer());
+    const result = qishuiAudioDecryptor.decrypt({ encryptedBuffer, spadeA: parsed.auth });
+    const payload = {
+      buffer: result.buffer,
+      contentType: result.extension === '.flac' ? 'audio/flac' : 'audio/mp4',
+      extension: result.extension,
+    };
+    rememberQishuiDecryptedAudio(key, payload);
+    return payload;
+  })();
+  qishuiAudioDecryptInFlight.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (qishuiAudioDecryptInFlight.get(key) === task) qishuiAudioDecryptInFlight.delete(key);
+  }
 }
 
 function sendAudioBuffer(res, buffer, contentType, range) {

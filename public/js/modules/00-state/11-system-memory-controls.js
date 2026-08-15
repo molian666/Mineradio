@@ -23,7 +23,6 @@ function ensureMemoryFxDefaults() {
     fx.memorySafetyRevision = MEMORY_SAFE_REVISION;
   }
   fx.memoryAutoSystemTrim = fx.memoryAutoSystemTrim === true;
-  fx.memorySystemAutoElevate = fx.memorySystemAutoElevate === true;
   fx.memorySystemIntervalMin = clampRange(Math.round(fx.memorySystemIntervalMin == null ? fxDefaults.memorySystemIntervalMin : Number(fx.memorySystemIntervalMin)), 5, 180);
   fx.memorySystemThresholdPercent = clampRange(Math.round(fx.memorySystemThresholdPercent == null ? fxDefaults.memorySystemThresholdPercent : Number(fx.memorySystemThresholdPercent)), 50, 98);
   fx.memorySystemMask = normalizeMemorySystemMask(fx.memorySystemMask == null ? fxDefaults.memorySystemMask : fx.memorySystemMask);
@@ -38,7 +37,6 @@ function memoryAutoConfigPayload(runNow) {
     mask: normalizeMemorySystemMask(fx && fx.memorySystemMask),
     intervalMin: Math.max(5, Math.round(Number(fx && fx.memorySystemIntervalMin) || 30)),
     thresholdPercent: Math.max(50, Math.min(98, Math.round(Number(fx && fx.memorySystemThresholdPercent) || 78))),
-    autoElevate: !!(fx && fx.memorySystemAutoElevate),
     runNow: runNow === true
   };
 }
@@ -111,14 +109,13 @@ function updateMemoryControls() {
   [
     ['memoryAutoTrimApp', 't-memoryAutoTrimApp'],
     ['memoryAutoTrimOnBackground', 't-memoryAutoTrimOnBackground'],
-    ['memoryAutoSystemTrim', 't-memoryAutoSystemTrim'],
-    ['memorySystemAutoElevate', 't-memorySystemAutoElevate']
+    ['memoryAutoSystemTrim', 't-memoryAutoSystemTrim']
   ].forEach(function (pair) {
     var el = document.getElementById(pair[1]);
     if (el) el.classList.toggle('on', !!fx[pair[0]]);
   });
   var systemAvailable = !memoryLastStatusPayload || memoryLastStatusPayload.systemPurgeAvailable !== false;
-  ['t-memoryAutoSystemTrim', 't-memorySystemAutoElevate'].forEach(function (id) {
+  ['t-memoryAutoSystemTrim'].forEach(function (id) {
     var el = document.getElementById(id);
     if (!el) return;
     el.classList.remove('dev-locked');

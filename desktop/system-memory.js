@@ -370,13 +370,23 @@ function purgeSystemMemoryElevated(mask, options) {
   const resultPath = makeTempPath('mem-result', 'json');
   const scriptPath = writeTempScript('mem-purge-elevated', [
     '#requires -RunAsAdministrator',
+    'Add-Type -TypeDefinition @\'',
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public static class MineradioConsoleHide {',
+    '  [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();',
+    '  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);',
+    '}',
+    '\'@',
+    '$consoleWindow = [MineradioConsoleHide]::GetConsoleWindow()',
+    'if ($consoleWindow -ne [IntPtr]::Zero) { [MineradioConsoleHide]::ShowWindow($consoleWindow, 0) | Out-Null }',
     buildPurgeScript(mask, resultPath),
   ].join('\r\n'));
   const launcherPath = writeTempScript('mem-launcher', [
     '$ErrorActionPreference = "Stop"',
     "$scriptPath = '" + escapePowerShellLiteral(scriptPath) + "'",
     "$resultPath = '" + escapePowerShellLiteral(resultPath) + "'",
-    'Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$scriptPath) | Out-Null',
+    'Start-Process -FilePath powershell.exe -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList @("-NoLogo","-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-File",$scriptPath) | Out-Null',
     'if (Test-Path -LiteralPath $resultPath) { @{ ok=$true } | ConvertTo-Json -Compress } else { @{ ok=$false; needAdmin=$true; message="User cancelled or denied administrator permission." } | ConvertTo-Json -Compress }',
   ]);
   return runPowerShellFile(launcherPath, 120000).then((launcherResult) => {
@@ -397,9 +407,11 @@ async function purgeSystemMemorySmart(mask, options) {
   options = options || {};
   if (!SYSTEM_PURGE_AVAILABLE) return purgeSystemMemory(mask, options);
   if (!SYSTEM_PURGE_ENABLED && options.manual !== true) return purgeSystemMemory(mask, options);
-  const autoElevate = options.autoElevate === true;
+  // 后台/自动清理永远不弹 UAC：只有用户在界面上明确点击“提权释放”时
+  // 才允许提权。自动定时清理只做当前权限可完成的静默释放。
+  const manual = options.manual === true;
   const elevated = await isProcessElevated();
-  if (autoElevate && !elevated) return purgeSystemMemoryElevated(mask, options);
+  if (manual && options.autoElevate === true && !elevated) return purgeSystemMemoryElevated(mask, options);
   return purgeSystemMemory(mask, options);
 }
 
