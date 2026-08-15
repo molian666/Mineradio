@@ -23,6 +23,12 @@ if (window.__mineradioPerf && typeof window.__mineradioPerf.registerRenderState 
   window.__mineradioPerf = renderPerfState;
 }
 var splashWarmRenderLast = 0;
+var cachedThumbCoverEl = null;
+var lastThumbCoverScale = 0;
+// 每帧复用对象：避免在 rAF / 音频分析热路径里反复分配字面量对象
+var cinemaProfileScratch = { energy: 0, low: 0, vocal: 0, melody: 0, lowOnset: 0, energyOnset: 0 };
+var sonicWorkshopCtxScratch = { scene: null, fx: null, time: 0, audio: null };
+var sonicTopologyAudioScratch = { bass: 0, mid: 0, treble: 0, beat: 0, energy: 0 };
 var fixedRenderCadenceState = {
   key: '',
   lastCheckAt: 0,
@@ -328,12 +334,16 @@ function animate() {
   if (isMainSceneCoveredBySplash()) {
     var splashWorkshopActive = window.MineradioSonicWorkshop && MineradioSonicWorkshop.isActive(fx);
     if (window.MineradioSonicWorkshop) {
-      MineradioSonicWorkshop.update(dt, {
-        scene: scene,
-        fx: fx,
-        time: uniforms.uTime.value,
-        audio: { bass: smoothBass, mid: smoothMid, treble: smoothTreb, beat: beatPulse, energy: smoothEnergy }
-      });
+      sonicWorkshopCtxScratch.scene = scene;
+      sonicWorkshopCtxScratch.fx = fx;
+      sonicWorkshopCtxScratch.time = uniforms.uTime.value;
+      sonicTopologyAudioScratch.bass = smoothBass;
+      sonicTopologyAudioScratch.mid = smoothMid;
+      sonicTopologyAudioScratch.treble = smoothTreb;
+      sonicTopologyAudioScratch.beat = beatPulse;
+      sonicTopologyAudioScratch.energy = smoothEnergy;
+      sonicWorkshopCtxScratch.audio = sonicTopologyAudioScratch;
+      MineradioSonicWorkshop.update(dt, sonicWorkshopCtxScratch);
     }
     if (splashWorkshopActive) {
       if (particles) particles.visible = false;
@@ -370,9 +380,11 @@ function animate() {
   var audioPerfStart = performance.now();
   beatOnsetFlag = false;
   var audioStepDt = consumeFrameGate(mainFrameGates.audio, now, dt, targetMainAudioFps(now), false, 'audio-analysis');
-  var sonicAudioFrame = fx && fx.sonicAudioMonitorEnabled !== false && typeof getSonicAudioMonitorSnapshot === 'function'
-    ? getSonicAudioMonitorSnapshot().frame
-    : null;
+  // 音效监视快照只在实际执行音频分析的帧里取，避免每个 rAF 都复制整帧对象
+  var sonicAudioFrame = null;
+  if (audioStepDt > 0 && fx && fx.sonicAudioMonitorEnabled !== false && typeof getSonicAudioMonitorSnapshot === 'function') {
+    sonicAudioFrame = getSonicAudioMonitorSnapshot().frame;
+  }
   if (audioStepDt > 0) {
   if (analyser && playing && audio && !audio.paused) {
     if (audioCtx && audioCtx.state === 'suspended') resumeAudioAnalysis();
@@ -385,14 +397,7 @@ function animate() {
     var midEnd = Math.min(len, 280);         // 3-6 kHz, 中高乐器
     // 累积
     var bKick = 0, mInst = 0, tHigh = 0, voc = 0, rms = 0;
-    var timeStride = (typeof runtimeAnalysisStride === 'function') ? runtimeAnalysisStride('time', timeDomainData.length) : 1;
-    var rmsCount = 0;
-    for (var j = 0; j < timeDomainData.length; j += timeStride) {
-      var tv = (timeDomainData[j] - 128) / 128;
-      rms += tv * tv;
-      rmsCount++;
-    }
-    rms = Math.sqrt(rms / Math.max(1, rmsCount));
+    rms = computeTimeDomainRms(timeDomainData);
     var analysisSampleRate = (audioCtx && audioCtx.sampleRate) || 44100;
     var analysisFftSize = (analyser && analyser.fftSize) || len * 2;
     if (typeof beatBandRms === 'function') {
@@ -501,7 +506,13 @@ function animate() {
     smoothMid = env(smoothMid, Math.min(0.68, rm * 0.64 + re * 0.025), 0.18, 0.060);
     smoothTreb = env(smoothTreb, Math.min(0.56, rt * 0.54), 0.18, 0.055);
     smoothEnergy = env(smoothEnergy, Math.min(0.72, re), 0.16, 0.055);
-    var cinemaProfileSample = { energy: re, low: rb, vocal: voc, melody: rm, lowOnset: bassOnset, energyOnset: energyOnset };
+    cinemaProfileScratch.energy = re;
+    cinemaProfileScratch.low = rb;
+    cinemaProfileScratch.vocal = voc;
+    cinemaProfileScratch.melody = rm;
+    cinemaProfileScratch.lowOnset = bassOnset;
+    cinemaProfileScratch.energyOnset = energyOnset;
+    var cinemaProfileSample = cinemaProfileScratch;
     if (sonicAudioFrame && sonicAudioFrame.sonicDetailed) {
       var sonicLowDrive = clamp01((Number(sonicAudioFrame.subBass) || 0) * 0.58
         + (Number(sonicAudioFrame.bass) || 0) * 0.78
@@ -628,7 +639,7 @@ function animate() {
   // v7.2 旋转 = 头部+眼球追踪 + 鼠标/手势拖动 + 惯性
   tickGestureRotation(dt);
   var skullPresetActive = fx && fx.preset === SKULL_PRESET_INDEX;
-  var workshopPresetActive = window.MineradioSonicWorkshop && MineradioSonicWorkshop.isActive(fx);
+  var workshopPresetActive = sonicWorkshopActiveEarly;
   var presetUsesStarRiverParticles = fx && (Number(fx.preset) === 5 || (typeof SONIC_PRESET_INDEX !== 'undefined' && Number(fx.preset) === SONIC_PRESET_INDEX));
   var presetStarRiverMuted = presetUsesStarRiverParticles && fx.backgroundStarRiver === false;
   particles.visible = !skullPresetActive && !workshopPresetActive && !presetStarRiverMuted;
@@ -655,6 +666,11 @@ function animate() {
   if (perfProbe && perfProbe.markSince) perfProbe.markSince('visual.skull-particles', skullPerfStart);
   var sonicPerfStart = performance.now();
   if (window.MineradioSonicTopography) {
+    sonicTopologyAudioScratch.bass = bass;
+    sonicTopologyAudioScratch.mid = mid;
+    sonicTopologyAudioScratch.treble = treble;
+    sonicTopologyAudioScratch.beat = beatPulse;
+    sonicTopologyAudioScratch.energy = audioEnergy;
     MineradioSonicTopography.update(dt, {
       scene: scene,
       fx: fx,
@@ -663,18 +679,17 @@ function animate() {
       dpr: renderer.getPixelRatio ? renderer.getPixelRatio() : (window.devicePixelRatio || 1),
       visualRotation: particles && particles.rotation ? particles.rotation : null,
       visualRotationActive: !!(orbit && orbit.rotating),
-      audio: sonicAudioFrame || { bass: bass, mid: mid, treble: treble, beat: beatPulse, energy: audioEnergy }
+      audio: sonicAudioFrame || sonicTopologyAudioScratch
     });
   }
   if (perfProbe && perfProbe.markSince) perfProbe.markSince('visual.sonic-topography', sonicPerfStart);
   var sonicWorkshopPerfStart = performance.now();
   if (window.MineradioSonicWorkshop) {
-    MineradioSonicWorkshop.update(dt, {
-      scene: scene,
-      fx: fx,
-      time: uniforms.uTime.value,
-      audio: { bass: bass, mid: mid, treble: treble, beat: beatPulse, energy: audioEnergy }
-    });
+    sonicWorkshopCtxScratch.scene = scene;
+    sonicWorkshopCtxScratch.fx = fx;
+    sonicWorkshopCtxScratch.time = uniforms.uTime.value;
+    sonicWorkshopCtxScratch.audio = sonicAudioFrame || sonicTopologyAudioScratch;
+    MineradioSonicWorkshop.update(dt, sonicWorkshopCtxScratch);
   }
   if (perfProbe && perfProbe.markSince) perfProbe.markSince('visual.sonic-workshop', sonicWorkshopPerfStart);
   var stageLyricsPerfStart = performance.now();
@@ -686,11 +701,14 @@ function animate() {
   if (desktopOverlayStepDt > 0) syncDesktopOverlayState();
   if (perfProbe && perfProbe.markSince) perfProbe.markSince('desktop.overlay-sync', desktopOverlayPerfStart);
 
-  // 缩略图脉动
+  // 缩略图脉动（元素引用只查找一次，避免每帧 getElementById 造成的 DOM 查询）
   if (currentIdx >= 0) {
     var s = 1 + bass * 0.08;
-    var thumbCoverEl = document.getElementById('thumb-cover');
-    if (thumbCoverEl) thumbCoverEl.style.transform = 'scale(' + s + ')';
+    if (Math.abs(s - lastThumbCoverScale) > 0.0001) {
+      lastThumbCoverScale = s;
+      if (!cachedThumbCoverEl) cachedThumbCoverEl = document.getElementById('thumb-cover');
+      if (cachedThumbCoverEl) cachedThumbCoverEl.style.transform = 'scale(' + s + ')';
+    }
   }
 
   var rendererPerfStart = performance.now();

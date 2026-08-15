@@ -6,7 +6,6 @@
 //  - 所有受保护 API 都会带上已登录用户的 cookie
 // ====================================================================
 const {
-  search,
   cloudsearch,
   song_detail,
   song_url,
@@ -155,6 +154,12 @@ const PORT = process.env.PORT || 3000;
 // Electron 主进程已显式设置 HOST=127.0.0.1；这里兜底防止纯 node 运行
 // server.js 时开放代理接口被局域网内其他设备滥用。
 const HOST = process.env.HOST || '127.0.0.1';
+// 高频请求路径（搜索、取歌、试听探测）的日志只在调试模式下输出，
+// 避免每次播放/搜索都产生控制台输出开销。
+const SERVER_DEBUG_LOGS = process.env.MINERADIO_SERVER_DEBUG === '1';
+function serverDebugLog(...args) {
+  if (SERVER_DEBUG_LOGS) console.log(...args);
+}
 const LOGIN_EASTER_EGG_GATE_FILE = String(process.env.MINERADIO_LOGIN_EASTER_EGG_GATE_FILE || '');
 const LOGIN_EASTER_EGG_GATE_VERSION = String(process.env.MINERADIO_LOGIN_EASTER_EGG_GATE_VERSION || 'world-peace-v1');
 const LOGIN_EASTER_EGG_PROTECTED_ROUTES = new Set([
@@ -703,9 +708,10 @@ function normalizeManifestUpdateInfo(data) {
   }
   const externalUrl = downloadPages.length ? downloadPages[0].url : legacyExternalUrl;
   const downloadPageUrl = externalUrl || htmlUrl;
+  const fallbackNotes = extractReleaseNotes(release.body || data.body);
   const notes = Array.isArray(release.notes) && release.notes.length
     ? release.notes.slice(0, 4).map(cleanReleaseLine).filter(Boolean)
-    : (extractReleaseNotes(release.body || data.body).length ? extractReleaseNotes(release.body || data.body) : UPDATE_FALLBACK_NOTES);
+    : (fallbackNotes.length ? fallbackNotes : UPDATE_FALLBACK_NOTES);
   return {
     configured: true,
     preview: false,
@@ -1005,7 +1011,8 @@ async function fetchLatestUpdateInfo() {
     const downloadPages = extractReleaseDownloadPages(data.body);
     const externalUrl = downloadPages.length ? downloadPages[0].url : '';
     const downloadPageUrl = externalUrl || htmlUrl;
-    const notes = extractReleaseNotes(data.body).length ? extractReleaseNotes(data.body) : UPDATE_FALLBACK_NOTES;
+    const parsedNotes = extractReleaseNotes(data.body);
+    const notes = parsedNotes.length ? parsedNotes : UPDATE_FALLBACK_NOTES;
     return {
       configured: true,
       preview: false,
@@ -1357,17 +1364,6 @@ function mapDiscoverPlaylist(pl, tag) {
   };
 }
 
-function lowSignalText(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function isLowSignalPodcastItem(item) {
-  const name = lowSignalText(item && (item.name || item.title || item.radioName));
-  const sub = lowSignalText(item && (item.djName || item.category || item.desc || item.sub));
-  const text = name + ' ' + sub;
-  return /购买播客|付费精品|qzone|空间背景音乐|背景音乐|四只烤翅|试纸烤翅/i.test(text);
-}
-
 const QQ_LIKED_PLAYLIST_ID = 'liked';
 const QQ_LIKED_DIRID = 201;
 const QQ_LIKED_PLAYLIST_NAME = 'QQ 音乐·我的喜欢';
@@ -1434,7 +1430,7 @@ async function requireLogin(res) {
 async function handleSearch(keywords, limit, offset) {
   limit = Math.max(1, Math.min(50, Number(limit) || 20));
   offset = Math.max(0, Number(offset) || 0);
-  console.log('[Search]', keywords, 'limit:', limit, 'offset:', offset);
+  serverDebugLog('[Search]', keywords, 'limit:', limit, 'offset:', offset);
   const result = await cloudsearch({ keywords, limit, offset, cookie: userCookie });
   const songs = result.body && result.body.result && result.body.result.songs ? result.body.result.songs : [];
 
@@ -1446,7 +1442,7 @@ async function handleSearch(keywords, limit, offset) {
   const missing = mapped.filter(s => !s.cover).map(s => s.id);
   if (missing.length) {
     try {
-      console.log('[Search] backfilling covers for', missing.length, 'songs');
+      serverDebugLog('[Search] backfilling covers for', missing.length, 'songs');
       const dd = await song_detail({ ids: missing.join(','), cookie: userCookie });
       const songsArr = (dd.body && dd.body.songs) || [];
       const idToPic = {};
@@ -2176,34 +2172,6 @@ function uniqueSongsByKey(songs) {
   return out;
 }
 
-function tagWeatherPoolSongs(songs, source) {
-  return (songs || []).map(song => ({ ...song, weatherSource: source }));
-}
-
-async function fetchWeatherPlaylistSongs(playlist, limit) {
-  const id = playlist && playlist.id;
-  if (!id) return [];
-  let rawTracks = [];
-  try {
-    if (typeof playlist_track_all === 'function') {
-      const all = await playlist_track_all({ id, limit: limit || 36, offset: 0, cookie: userCookie, timestamp: Date.now() });
-      rawTracks = (all.body && (all.body.songs || all.body.tracks)) || [];
-    }
-  } catch (e) {
-    console.warn('[WeatherRadio] playlist_track_all failed:', playlist && playlist.name, e.message);
-  }
-  if (!rawTracks.length && typeof playlist_detail === 'function') {
-    try {
-      const detail = await playlist_detail({ id, s: 0, cookie: userCookie, timestamp: Date.now() });
-      const pl = (detail.body && detail.body.playlist) || {};
-      rawTracks = pl.tracks || [];
-    } catch (e) {
-      console.warn('[WeatherRadio] playlist_detail failed:', playlist && playlist.name, e.message);
-    }
-  }
-  return rawTracks.map(mapSongRecord).filter(song => song.id && song.name).slice(0, limit || 36);
-}
-
 const NETEASE_PLAYLIST_SYNC_PAGE_SIZE = 200;
 const NETEASE_PLAYLIST_SYNC_MAX_PAGES = 80;
 const NETEASE_TRACK_SYNC_PAGE_SIZE = 500;
@@ -2471,27 +2439,6 @@ async function fetchNeteasePlaylistTracksPage(id, limit, offset) {
   };
 }
 
-async function filterLikelyPlayableWeatherSongs(songs) {
-  const source = uniqueSongsByKey(songs)
-    .filter(song => song && song.name && song.id && !isLowSignalWeatherSong(song))
-    .slice(0, 24);
-  const playable = [];
-  const fallback = source.slice(0, 24);
-  for (let i = 0; i < source.length; i += 4) {
-    const chunk = source.slice(i, i + 4);
-    const settled = await Promise.allSettled(chunk.map(async song => {
-      const info = await handleSongUrl(song.id, { loggedIn: !!userCookie }, 'standard');
-      return info && info.url ? song : null;
-    }));
-    settled.forEach((result, idx) => {
-      if (result.status === 'fulfilled' && result.value) playable.push(result.value);
-      else if (result.status === 'rejected') console.warn('[WeatherRadio] playable probe failed:', chunk[idx] && chunk[idx].name, result.reason && result.reason.message);
-    });
-    if (playable.length >= 12) break;
-  }
-  return (playable.length ? playable : fallback).slice(0, 24);
-}
-
 function isLowSignalWeatherSong(song) {
   const text = String([
     song && song.name,
@@ -2630,10 +2577,6 @@ async function qqMusicRequest(payload, opts) {
     timeoutMs: opts.timeoutMs,
   }, body);
   return parseJSONText(text);
-}
-
-function qqVipObjectLooksExpired(obj) {
-  return qqVipObjectLooksExpiredStrict(obj);
 }
 
 function normalizeQQVipPayload(payload, fallback) {
@@ -3845,7 +3788,7 @@ async function handleQQSearch(keywords, limit, offset) {
   if (!kw) return [];
   limit = Math.max(1, Math.min(30, Number(limit) || 12));
   offset = Math.max(0, Number(offset) || 0);
-  console.log('[QQSearch]', kw, 'limit:', limit, 'offset:', offset);
+  serverDebugLog('[QQSearch]', kw, 'limit:', limit, 'offset:', offset);
   let base = [];
   try {
     base = await qqFullSongSearch(kw, limit, offset);
@@ -4732,7 +4675,7 @@ async function fetchMyPodcastItems(key, info, limit, offset) {
 //   返回 { url, trial, level, br }
 //   trial=true 表示这是试听片段 (freeTrialInfo 非空)
 async function resolveNeteaseDirectSongUrl(id, loginInfo, qualityPreference) {
-  console.log('[SongUrl] id:', id, 'logged-in:', !!userCookie);
+  serverDebugLog('[SongUrl] id:', id, 'logged-in:', !!userCookie);
   const resolveDeadline = Date.now() + NETEASE_DIRECT_RESOLVE_BUDGET_MS;
   const requestedQuality = normalizeQualityPreference(qualityPreference);
   const svipReady = hasNeteaseSvip(loginInfo);
@@ -4769,7 +4712,7 @@ async function resolveNeteaseDirectSongUrl(id, loginInfo, qualityPreference) {
       if (d) lastData = d;
       const url = d && d.url;
       const freeTrial = d && d.freeTrialInfo;
-      console.log('[SongUrl]', q.level, '->', url ? 'OK' : 'no url', freeTrial ? '(TRIAL)' : '');
+      serverDebugLog('[SongUrl]', q.level, '->', url ? 'OK' : 'no url', freeTrial ? '(TRIAL)' : '');
       let probe = null;
       if (url) {
         probe = probeCache.get(url);
@@ -4818,7 +4761,7 @@ async function resolveNeteaseDirectSongUrl(id, loginInfo, qualityPreference) {
       }
     } catch (err) {
       lastError = err;
-      console.log('[SongUrl]', q.level, 'failed:', err.message);
+      serverDebugLog('[SongUrl]', q.level, 'failed:', err.message);
     }
   }
   if (trialFallback) return trialFallback;
@@ -5001,7 +4944,7 @@ function collectVipStringValues(value, out, depth) {
   });
   return out;
 }
-const neteaseVipInfoCache = new Map();
+const neteaseVipInfoCache = createBoundedTtlCache({ maxEntries: 64, ttlMs: 5 * 60 * 1000 });
 function activeNeteaseVipPackage(pkg) {
   if (!pkg || typeof pkg !== 'object') return false;
   const expire = Number(pkg.expireTime || pkg.expire_time || pkg.expire || pkg.endTime || 0) || 0;
@@ -5012,7 +4955,7 @@ async function fetchNeteaseVipInfo(userId) {
   userId = String(userId || '').trim();
   if (!userId || !userCookie) return null;
   const cached = neteaseVipInfoCache.get(userId);
-  if (cached && Date.now() - cached.at < 5 * 60 * 1000) return cached.value;
+  if (cached) return cached;
   let body = null;
   try {
     const r = await vip_info_v2({ uid: userId, cookie: userCookie, timestamp: Date.now() });
@@ -5025,7 +4968,7 @@ async function fetchNeteaseVipInfo(userId) {
       console.warn('[Login] vip_info failed:', err.message);
     }
   }
-  if (body) neteaseVipInfoCache.set(userId, { at: Date.now(), value: body });
+  if (body) neteaseVipInfoCache.set(userId, body);
   return body;
 }
 function normalizeNeteaseVip(profile, account, extra) {
@@ -7109,13 +7052,13 @@ const server = http.createServer(async (req, res) => {
         sendJSON(res, { error: 'Invalid audio url' }, 400);
         return;
       }
-      console.log('[PodcastDjBeatmap] start', Math.round(durationSec || 0) + 's');
+      serverDebugLog('[PodcastDjBeatmap] start', Math.round(durationSec || 0) + 's');
       const started = Date.now();
       const introSec = Math.max(0, Number(url.searchParams.get('intro') || 0) || 0);
       const map = introSec
         ? await analyzePodcastDjIntro(audioUrl, { durationSec, introSec, userAgent: UA })
         : await analyzePodcastDjStream(audioUrl, { durationSec, userAgent: UA });
-      console.log('[PodcastDjBeatmap] done beats:', map.visualBeatCount || 0, 'ms:', Date.now() - started, 'decode:', map.decode || {});
+      serverDebugLog('[PodcastDjBeatmap] done beats:', map.visualBeatCount || 0, 'ms:', Date.now() - started, 'decode:', map.decode || {});
       sendJSON(res, { ok: true, map });
     } catch (err) {
       console.error('[PodcastDjBeatmap]', err);

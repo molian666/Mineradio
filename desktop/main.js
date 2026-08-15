@@ -76,6 +76,9 @@ let appMemoryTrimInFlight = false;
 let lastAppMemoryTrimAt = 0;
 let lastAppMemoryTrimReason = '';
 let memoryAutoTimer = null;
+// 后台自动清理的最小执行间隔：深度后台/定时触发叠加时，防止高频重复
+// 拉起隐藏 PowerShell 清理进程（5 分钟内最多真正执行一次释放）。
+const MEMORY_AUTO_MIN_PURGE_INTERVAL_MS = 5 * 60 * 1000;
 let memoryAutoState = {
   appTrimEnabled: true,
   backgroundTrimEnabled: true,
@@ -84,6 +87,7 @@ let memoryAutoState = {
   intervalMin: 30,
   thresholdPercent: 78,
   lastRunAt: 0,
+  lastPurgeAt: 0,
   lastReason: '',
   lastResult: null,
   lastError: '',
@@ -517,10 +521,13 @@ const CHROMIUM_SAFE_PERFORMANCE_SWITCHES = [
 // "audio offload"，缓冲/码率切换时机不合适时会直接断续。请求一个与 offload
 // 预期不一致的输出缓冲（帧数）会让 Chromium 退回软件缓冲路径，配合
 // renderer 内 WebAudio 的大缓冲，可显著减少蓝牙断续。
-// 帧数可用 MINERADIO_AUDIO_BUFFER_SIZE 覆盖（默认 ~4096 帧 ≈ 85-93ms）。
-const CHROMIUM_SAFE_AUDIO_STABILITY_SWITCHES = [
-  ['audio-buffer-size', process.env.MINERADIO_AUDIO_BUFFER_SIZE || '4096'],
-];
+// 注意：--audio-buffer-size 在不同声卡/驱动上可能直接破坏 Chromium 音频管线
+// （媒体数据全部就绪但媒体时钟不走，表现为"显示播放中却无声无进度"）。
+// 因此默认不再强制设置，仅当显式设置 MINERADIO_AUDIO_BUFFER_SIZE 时按需启用；
+// 值 0 表示使用 Chromium 默认缓冲。
+const CHROMIUM_OPT_IN_AUDIO_STABILITY_SWITCHES = process.env.MINERADIO_AUDIO_BUFFER_SIZE
+  ? [['audio-buffer-size', String(process.env.MINERADIO_AUDIO_BUFFER_SIZE)]]
+  : [];
 const CHROMIUM_OPT_IN_PERFORMANCE_SWITCHES = [
   ['ignore-gpu-blocklist', null, 'MINERADIO_IGNORE_GPU_BLOCKLIST'],
   ['force_high_performance_gpu', null, 'MINERADIO_FORCE_HIGH_PERFORMANCE_GPU'],
@@ -533,7 +540,7 @@ function appendChromiumSwitch(name, value) {
   else app.commandLine.appendSwitch(name, value);
 }
 for (const [name, value] of CHROMIUM_SAFE_PERFORMANCE_SWITCHES) appendChromiumSwitch(name, value);
-for (const [name, value] of CHROMIUM_SAFE_AUDIO_STABILITY_SWITCHES) appendChromiumSwitch(name, value);
+for (const [name, value] of CHROMIUM_OPT_IN_AUDIO_STABILITY_SWITCHES) appendChromiumSwitch(name, value);
 for (const [name, value, envName] of CHROMIUM_OPT_IN_PERFORMANCE_SWITCHES) {
   if (process.env[envName] === '1') appendChromiumSwitch(name, value);
 }
@@ -873,20 +880,6 @@ function getWallpaperEngineCaptureGrant() {
   return grant;
 }
 
-function isTransientWallpaperEngineCaptureError(value) {
-  return /NotReadableError|WALLPAPER_ENGINE_REFRESH_SUPERSEDED|WALLPAPER_CAPTURE_FAILED|WALLPAPER_CAPTURE_PREPARED_STREAM_MISSING/i
-    .test(String(value || ''));
-}
-
-function resetWallpaperEngineCaptureGrantForRetry(grant) {
-  if (!grant || wallpaperEngineCaptureGrant !== grant) return false;
-  const active = wallpaperEngineRuntime.getStatus();
-  if (!active || !active.active || active.sessionId !== grant.sessionId) return false;
-  grant.requestStarted = false;
-  grant.expiresAt = Date.now() + WALLPAPER_ENGINE_CAPTURE_GRANT_MS;
-  return true;
-}
-
 function isTrustedWallpaperEngineDisplayCapturePermission(webContents, origin, details) {
   try {
     if (!webContents || !mainWindow || mainWindow.isDestroyed() || webContents !== mainWindow.webContents || webContents.isDestroyed()) return false;
@@ -910,43 +903,6 @@ function isTrustedWallpaperEnginePreparationMediaPermission(webContents, origin,
   if (mediaType && !mediaType.includes('video')) return false;
   if (mediaTypes.length && !mediaTypes.every((value) => value.includes('video'))) return false;
   return isTrustedWallpaperEngineDisplayCapturePermission(webContents, origin, details);
-}
-
-async function prepareWallpaperEngineRendererCapture(sessionId, fps) {
-  if (!mainWindow || mainWindow.isDestroyed() || !/^[a-f0-9]{24}$/i.test(String(sessionId || ''))) {
-    return { ok: false, error: 'WALLPAPER_CAPTURE_RENDERER_UNAVAILABLE' };
-  }
-  const safeSessionId = String(sessionId);
-  const safeFps = Math.max(24, Math.min(WALLPAPER_ENGINE_MAX_CAPTURE_FPS, Number(fps) || 60));
-  const grant = getWallpaperEngineCaptureGrant();
-  if (!grant || grant.sessionId !== safeSessionId) return { ok: false, error: 'WALLPAPER_CAPTURE_GRANT_MISSING' };
-  const safeSourceId = /^window:\d+:\d+$/.test(String(grant.sourceId || '')) ? String(grant.sourceId) : '';
-  if (!safeSourceId) return { ok: false, error: 'WALLPAPER_CAPTURE_SOURCE_INVALID' };
-  const script = `(() => {
-    const prepare = window.__mineradioPrepareWallpaperEngineCapture;
-    if (typeof prepare !== 'function') return { ok: false, error: 'WALLPAPER_CAPTURE_PREPARE_HANDLER_MISSING' };
-    return Promise.resolve(prepare(${JSON.stringify(safeSessionId)}, ${safeFps}, ${JSON.stringify(safeSourceId)}))
-      .then((value) => value && typeof value === 'object' ? value : { ok: false, error: 'WALLPAPER_CAPTURE_PREPARE_RESULT_INVALID' })
-      .catch((error) => ({ ok: false, error: String(error && (error.message || error.name) || error || 'WALLPAPER_CAPTURE_PREPARE_FAILED').slice(0, 500) }));
-  })()`;
-  let timeout;
-  try {
-    wallpaperEngineCapturePreparationOperation = grant.operation;
-    const result = await Promise.race([
-      mainWindow.webContents.executeJavaScript(script, true),
-      new Promise((resolve) => {
-        timeout = setTimeout(() => resolve({ ok: false, error: 'WALLPAPER_CAPTURE_PREPARE_TIMEOUT' }), WALLPAPER_ENGINE_CAPTURE_PREPARE_TIMEOUT_MS);
-      }),
-    ]);
-    return result && typeof result === 'object'
-      ? { ok: result.ok === true, error: String(result.error || '').slice(0, 500) }
-      : { ok: false, error: 'WALLPAPER_CAPTURE_PREPARE_RESULT_INVALID' };
-  } catch (error) {
-    return { ok: false, error: String(error && (error.message || error.name) || error || 'WALLPAPER_CAPTURE_PREPARE_FAILED').slice(0, 500) };
-  } finally {
-    if (wallpaperEngineCapturePreparationOperation === grant.operation) wallpaperEngineCapturePreparationOperation = 0;
-    if (timeout) clearTimeout(timeout);
-  }
 }
 
 async function prepareWallpaperEngineRendererGlassCapture(sessionId, fps, sourceId) {
@@ -1422,23 +1378,6 @@ async function setFullDesktopModeInteractive(value, reason = 'interaction-change
   try {
     if (value === true) await syncWallpaperEngineDesktopIconLayering(`${reason}-coexist-preflight`, true);
     return await fullDesktopModeRuntime.setInteractive(value, reason);
-  } finally {
-    await syncWallpaperEngineDesktopIconLayering(`${reason}-settled`).catch(() => false);
-    fullDesktopModeHostVisibilityTransitionDepth = Math.max(0, fullDesktopModeHostVisibilityTransitionDepth - 1);
-    syncWallpaperEngineWithFullDesktopMode(mainWindow, `${reason}-settled`);
-    if (fullDesktopModeRuntime.getStatus(`${reason}-cleanup`).enabled !== true) {
-      releaseFullDesktopModeRecoveryTray();
-    }
-    syncFullDesktopEscapeShortcut(`${reason}-escape`);
-  }
-}
-
-async function toggleFullDesktopModeInteraction(reason = 'interaction-toggled') {
-  fullDesktopModeHostVisibilityTransitionDepth += 1;
-  try {
-    const before = fullDesktopModeRuntime.getStatus(`${reason}-before`);
-    if (before.interactive !== true) await syncWallpaperEngineDesktopIconLayering(`${reason}-coexist-preflight`, true);
-    return await fullDesktopModeRuntime.toggleInteractive(reason);
   } finally {
     await syncWallpaperEngineDesktopIconLayering(`${reason}-settled`).catch(() => false);
     fullDesktopModeHostVisibilityTransitionDepth = Math.max(0, fullDesktopModeHostVisibilityTransitionDepth - 1);
@@ -1985,6 +1924,7 @@ function normalizeMemoryAutoState(payload = {}) {
     intervalMin: Math.max(5, Math.min(180, Math.round(Number(payload.intervalMin != null ? payload.intervalMin : memoryAutoState.intervalMin) || 30))),
     thresholdPercent: Math.max(0, Math.min(100, Math.round(Number(payload.thresholdPercent != null ? payload.thresholdPercent : memoryAutoState.thresholdPercent) || 0))),
     lastRunAt: memoryAutoState.lastRunAt || 0,
+    lastPurgeAt: memoryAutoState.lastPurgeAt || 0,
     lastReason: memoryAutoState.lastReason || '',
     lastResult: memoryAutoState.lastResult || null,
     lastError: '',
@@ -2024,11 +1964,17 @@ async function runMemoryAutoTick(reason = 'auto') {
   }
   memoryAutoState.lastRunAt = Date.now();
   memoryAutoState.lastReason = reason;
+  const sinceLastPurge = Date.now() - (memoryAutoState.lastPurgeAt || 0);
+  if (sinceLastPurge < MEMORY_AUTO_MIN_PURGE_INTERVAL_MS) {
+    memoryAutoState.lastResult = { ok: true, skipped: true, reason: 'min-interval' };
+    return { ok: true, skipped: true, reason: 'min-interval', snapshot, state: memoryAutoState };
+  }
   try {
     const result = await systemMemory.purgeSystemMemorySmart(memoryAutoState.mask, {
       // 后台自动清理保持静默：绝不请求 UAC 提权。
       autoElevate: false,
     });
+    memoryAutoState.lastPurgeAt = Date.now();
     memoryAutoState.lastResult = result;
     memoryAutoState.lastError = '';
     return { ok: true, result, snapshot: await systemMemory.getMemorySnapshotExtended(), state: memoryAutoState };
@@ -2290,45 +2236,6 @@ function bindStartupFailureHandlers() {
 }
 
 bindStartupFailureHandlers();
-
-function shouldEnsureDesktopShortcut() {
-  if (process.platform !== 'win32') return false;
-  if (process.env.MINERADIO_NO_DESKTOP_SHORTCUT === '1') return false;
-  return app.isPackaged || process.env.MINERADIO_CREATE_DESKTOP_SHORTCUT === '1';
-}
-
-function ensureDesktopShortcut() {
-  if (!shouldEnsureDesktopShortcut()) return { ok: false, skipped: true };
-  try {
-    const shortcutPath = path.join(app.getPath('desktop'), `${APP_NAME}.lnk`);
-    const target = process.execPath;
-    const shortcut = {
-      target,
-      cwd: path.dirname(target),
-      args: '',
-      description: `${APP_NAME} desktop music player`,
-      icon: fs.existsSync(APP_ICON_ICO) ? APP_ICON_ICO : target,
-      iconIndex: 0,
-      appUserModelId: APP_USER_MODEL_ID,
-    };
-
-    if (fs.existsSync(shortcutPath) && shell.readShortcutLink) {
-      try {
-        const existing = shell.readShortcutLink(shortcutPath);
-        if (existing && path.resolve(existing.target || '') === path.resolve(target) && String(existing.args || '') === '') {
-          return { ok: true, path: shortcutPath, existing: true };
-        }
-      } catch (_) {}
-      shell.writeShortcutLink(shortcutPath, 'replace', shortcut);
-    } else {
-      shell.writeShortcutLink(shortcutPath, 'create', shortcut);
-    }
-    return { ok: true, path: shortcutPath, created: true };
-  } catch (e) {
-    console.warn('Desktop shortcut creation skipped:', e.message);
-    return { ok: false, error: e.message || 'DESKTOP_SHORTCUT_FAILED' };
-  }
-}
 
 function parseCookieHeader(cookieText) {
   const out = {};
@@ -3381,9 +3288,16 @@ function getAdaptiveWindowMinimumSize(display) {
   };
 }
 
+let mainWindowMinimumSizeCacheKey = '';
 function updateMainWindowMinimumSize(win) {
   if (!win || win.isDestroyed()) return;
-  const minimum = getAdaptiveWindowMinimumSize(getWindowDisplay(win));
+  const display = getWindowDisplay(win);
+  const minimum = getAdaptiveWindowMinimumSize(display);
+  // move/resize 事件会高频触发；显示器与最小尺寸未变化时跳过
+  // getDisplayMatching + setMinimumSize（两者都是原生调用）。
+  const key = String(display && display.id || 'primary') + ':' + minimum.width + 'x' + minimum.height;
+  if (mainWindowMinimumSizeCacheKey === key) return;
+  mainWindowMinimumSizeCacheKey = key;
   win.setMinimumSize(minimum.width, minimum.height);
 }
 
@@ -3643,7 +3557,7 @@ while ($true) {
     [Console]::Out.Flush()
   }
   $prev = $down
-  Start-Sleep -Milliseconds 24
+  Start-Sleep -Milliseconds 40
 }
 `;
   try {
@@ -5633,6 +5547,35 @@ async function createWindowOnce() {
     stopWallpaperEngineRuntimeForRenderer('main-frame-navigation');
     closeWallpaperWindow('main-frame-navigation').catch(() => {});
   });
+  // 诊断：把渲染端 warning/error 转发到主进程终端，便于定位播放/加载/熔断问题。
+  if (!win.__mineradioConsoleForwarded) {
+    win.__mineradioConsoleForwarded = true;
+    win.webContents.on('console-message', (_event, detailsOrLevel, maybeMessage) => {
+      try {
+        let level = '';
+        let message = '';
+        if (detailsOrLevel && typeof detailsOrLevel === 'object' && typeof detailsOrLevel.message === 'string') {
+          // 新签名 (event, details): details = { level, message, lineNumber, sourceId, frame }
+          level = detailsOrLevel.level == null ? 'log' : String(detailsOrLevel.level);
+          message = detailsOrLevel.message;
+        } else if (typeof maybeMessage === 'string') {
+          // 旧签名 (event, level, message, line, sourceId)
+          level = detailsOrLevel == null ? 'log' : String(detailsOrLevel);
+          message = maybeMessage;
+        } else if (typeof detailsOrLevel === 'string') {
+          message = detailsOrLevel;
+        }
+        if (!message) return;
+        const levelNum = /^\d+$/.test(level) ? Number(level) : -1;
+        const isWarning = levelNum === 2 || /warning|warn/i.test(level);
+        const isError = levelNum === 3 || /error/i.test(level);
+        if (isWarning || isError) {
+          console.log('[Renderer:' + (isError ? 'error' : 'warn') + '] ' + message);
+        }
+      } catch (e) { /* 诊断转发不应影响主流程 */ }
+    });
+    console.log('[RendererBridge] console forwarding attached');
+  }
   win.webContents.once('destroyed', () => {
     stopWallpaperEngineRuntimeForRenderer('webcontents-destroyed');
     closeWallpaperWindow('webcontents-destroyed').catch(() => {});
@@ -5822,6 +5765,10 @@ async function createWindowOnce() {
     if (appMemoryTrimTimer) {
       clearTimeout(appMemoryTrimTimer);
       appMemoryTrimTimer = null;
+    }
+    if (mainWindowUnresponsiveTimer) {
+      clearTimeout(mainWindowUnresponsiveTimer);
+      mainWindowUnresponsiveTimer = null;
     }
     cancelWallpaperEngineHostBoundsRestart();
     fullDesktopModeHostVisibilityTransitionDepth = 0;

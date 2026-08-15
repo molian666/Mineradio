@@ -1,7 +1,11 @@
-var homeWaveTrackState = { bars: 0, smooth: [] };
+var homeWaveTrackState = { bars: 0, smooth: [], el: null };
 function ensureHomeWaveTrackBars() {
-  var el = document.getElementById('home-wave-track');
-  if (!el) return;
+  var el = homeWaveTrackState.el;
+  if (!el) {
+    el = document.getElementById('home-wave-track');
+    if (!el) return;
+    homeWaveTrackState.el = el;
+  }
   var count = 24;
   if (homeWaveTrackState.bars === count && el.children.length === count) return;
   homeWaveTrackState.bars = count;
@@ -10,8 +14,12 @@ function ensureHomeWaveTrackBars() {
 }
 function updateHomeAudioVisual(dt) {
   if (!emptyHomeActive) return;
-  var wave = document.getElementById('home-wave-track');
-  if (!wave) return;
+  var wave = homeWaveTrackState.el;
+  if (!wave) {
+    wave = document.getElementById('home-wave-track');
+    if (!wave) return;
+    homeWaveTrackState.el = wave;
+  }
   var nowMs = performance.now();
   if (homeWaveTrackState.lastAt && nowMs - homeWaveTrackState.lastAt < 80) return;
   homeWaveTrackState.lastAt = nowMs;

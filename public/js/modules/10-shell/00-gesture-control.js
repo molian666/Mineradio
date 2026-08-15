@@ -388,8 +388,6 @@ function showGestureHUD(label, progress, detail) {
   if (fill) fill.style.width = Math.max(0, Math.min(100, (progress || 0) * 100)) + '%';
   hud.classList.add('show');
 }
-function showGestureCursor() { }  // stub: 兼容旧调用
-function hideGestureCursor() { }  // stub: 兼容旧调用
 
 
 // ============================================================

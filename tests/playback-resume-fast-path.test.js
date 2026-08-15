@@ -287,11 +287,64 @@ async function testUnrefreshableSongUsesSingleDirectResumeAttempt() {
   assert.strictEqual(calls.hideLoading, 1);
 }
 
+function testTrackSwitchStallRecoveryAllowedForAllProviders() {
+  // 回归：非汽水平台的切歌/新歌启动停滞（"显示播放中但无声无进度"）也必须允许
+  // 停滞恢复，否则第三方音源下线/链接失效时播放器会永远停在假播放状态。
+  const sourceText = fs.readFileSync(modulePath, 'utf8');
+  const fn = extractFunction(sourceText, 'trackSwitchStallRecoveryAllowed');
+  const context = vm.createContext({
+    audio: { src: 'https://local.invalid/a', paused: false, ended: false, seeking: false },
+    playbackResumeProvider(song) { return (song && song.provider) || ''; },
+    console: { warn() {} },
+  });
+  vm.runInContext(fn, context, { filename: modulePath });
+
+  const qishui = { provider: 'qishui' };
+  const netease = { provider: 'netease' };
+
+  assert.strictEqual(
+    context.trackSwitchStallRecoveryAllowed(netease, { trackSwitch: true }),
+    true,
+    'non-qishui track switch with live media must be allowed to schedule start-stall recovery',
+  );
+  assert.strictEqual(
+    context.trackSwitchStallRecoveryAllowed(qishui, { trackSwitch: true }),
+    true,
+    'qishui track switch keeps its recovery allowance',
+  );
+  assert.strictEqual(
+    context.trackSwitchStallRecoveryAllowed(netease, { resumeRecovery: true }),
+    true,
+    'resume recovery is always allowed',
+  );
+  assert.strictEqual(
+    context.trackSwitchStallRecoveryAllowed(netease, {}),
+    true,
+    'event-driven stall recovery (error/stalled, no trackSwitch) stays allowed',
+  );
+
+  const pausedAudio = { src: 'https://local.invalid/a', paused: true, ended: false, seeking: false };
+  const endedAudio = { src: 'https://local.invalid/a', paused: false, ended: true, seeking: false };
+  const seekingAudio = { src: 'https://local.invalid/a', paused: false, ended: false, seeking: true };
+  const originalAudio = context.audio;
+  try {
+    context.audio = pausedAudio;
+    assert.strictEqual(context.trackSwitchStallRecoveryAllowed(netease, { trackSwitch: true }), false, 'paused media must not schedule recovery');
+    context.audio = endedAudio;
+    assert.strictEqual(context.trackSwitchStallRecoveryAllowed(netease, { trackSwitch: true }), false, 'ended media must not schedule recovery');
+    context.audio = seekingAudio;
+    assert.strictEqual(context.trackSwitchStallRecoveryAllowed(netease, { trackSwitch: true }), false, 'seeking media must not schedule recovery');
+  } finally {
+    context.audio = originalAudio;
+  }
+}
+
 async function run() {
   await testFastResumeSucceedsWithoutRecovery();
   await testFastResumeTimeoutFallsBackToFreshUrlRecovery();
   await testLongPauseUsesStaleSourceRecoveryLabel();
   await testUnrefreshableSongUsesSingleDirectResumeAttempt();
+  testTrackSwitchStallRecoveryAllowedForAllProviders();
   console.log('OK playback-resume-fast-path');
 }
 

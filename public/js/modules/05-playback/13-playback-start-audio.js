@@ -1,4 +1,24 @@
 /* mineradio-lx-addon: playback-entry-bridge main playback */
+// 第三方音源（UserApi）整体失败的熔断：某段时间内连续多次解析全部失败（音源
+// 服务下线 / DNS 失效 / 全部超时）时，跳过 UserApi 直接走内置音源通道，避免
+// 每次播放都空等满预算（最长 ~12s）造成"点了播放加载好久"。任何一次成功都会
+// 重置。状态放在模块级，跨多次解析调用持续生效。
+var MINERADIO_LX_USERAPI_FAIL_THRESHOLD = 2;
+var MINERADIO_LX_USERAPI_FAIL_COOLDOWN_MS = 4 * 60 * 1000;
+var mineradioLxUserApiFailStreak = 0;
+var mineradioLxUserApiFailStreakStartAt = 0;
+function mineradioLxUserApiCircuitOpen() {
+  if (mineradioLxUserApiFailStreak < MINERADIO_LX_USERAPI_FAIL_THRESHOLD) return false;
+  return Date.now() - mineradioLxUserApiFailStreakStartAt < MINERADIO_LX_USERAPI_FAIL_COOLDOWN_MS;
+}
+function mineradioLxUserApiMarkSuccess() {
+  mineradioLxUserApiFailStreak = 0;
+  mineradioLxUserApiFailStreakStartAt = 0;
+}
+function mineradioLxUserApiMarkFailure() {
+  mineradioLxUserApiFailStreak += 1;
+  if (mineradioLxUserApiFailStreak === 1) mineradioLxUserApiFailStreakStartAt = Date.now();
+}
 function mineradioLxResolveImportedSong(song, quality) {
   if (!window.mineradioUserApi || typeof window.mineradioUserApi.resolveSongUrl !== 'function') return Promise.resolve(null);
   var requestedQuality = quality;
@@ -74,11 +94,18 @@ function mineradioLxResolveImportedSong(song, quality) {
     var originalLxProviderKey = providerToLxKey[originalProvider];
     var importDeadline = Date.now() + IMPORT_RESOLVE_TOTAL_BUDGET_MS;
     var remainingBudget = function () { return Math.max(1500, importDeadline - Date.now()); };
+    if (mineradioLxUserApiCircuitOpen()) {
+      console.warn('[Mineradio-LX UserApi] circuit open: skipping imported resolve for the next ' + MINERADIO_LX_USERAPI_FAIL_COOLDOWN_MS + 'ms');
+      return null;
+    }
     try {
       var originalResult = await lxResolveAttempt(function () {
         return window.mineradioUserApi.resolveSongUrl(song, requestedQuality, { provider: originalLxProviderKey });
       }, remainingBudget());
-      if (hasUrl(originalResult)) return originalResult;
+      if (hasUrl(originalResult)) {
+        mineradioLxUserApiMarkSuccess();
+        return originalResult;
+      }
     } catch (error) {
       warnProviderFailure(originalProvider, error);
     }
@@ -105,11 +132,15 @@ function mineradioLxResolveImportedSong(song, quality) {
         var candidateResult = await lxResolveAttempt(function () {
           return window.mineradioUserApi.resolveSongUrl(candidate, requestedQuality, { provider: lxProviderKey });
         }, remainingBudget());
-        if (hasUrl(candidateResult)) return candidateResult;
+        if (hasUrl(candidateResult)) {
+          mineradioLxUserApiMarkSuccess();
+          return candidateResult;
+        }
       } catch (error) {
         warnProviderFailure(candidateProvider, error);
       }
     }
+    mineradioLxUserApiMarkFailure();
     return null;
   })();
 }
@@ -1244,7 +1275,15 @@ async function playQueueAt(idx, opts) {
       var data;
       var importedPlaybackData = null;
       if (!albumGaplessHandoff && !opts.preResolvedPlaybackData && typeof mineradioLxResolveImportedSong === 'function') {
-        importedPlaybackData = await mineradioLxResolveImportedSong(song, requestedQuality);
+        // UserApi 解析必须被严格隔离：即使它意外抛错/挂起，也要继续走下面的
+        // 内置音源通道，绝不能把整首歌判死（否则第三方音源异常会让所有歌曲
+        // 在尝试内置通道之前就被跳过）。
+        try {
+          importedPlaybackData = await mineradioLxResolveImportedSong(song, requestedQuality);
+        } catch (resolveErr) {
+          console.warn('[PlaybackStart] imported resolve threw, falling back to built-in:', resolveErr && (resolveErr.message || resolveErr));
+          importedPlaybackData = null;
+        }
       }
       if (importedPlaybackData && importedPlaybackData.url) {
         data = importedPlaybackData;

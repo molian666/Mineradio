@@ -171,6 +171,9 @@ function updateCinemaTrackProfile(sample) {
   p.scale += (target - p.scale) * (target > p.scale ? (djMode.active ? 0.045 : 0.030) : (djMode.active ? 0.030 : 0.045));
 }
 
+// 每帧复用的实时节拍采样对象（readSonicRealtimeCameraSample 的返回值
+// 只会被同步读取，不会长期持有）
+var sonicCameraSampleScratch = { lowPresence: 0, lowAttack: 0, score: 0, strength: 0, lowDominance: 0, lowFluxDominance: 0 };
 function readSonicRealtimeCameraSample() {
   if (typeof sonicAudioMonitorState === 'undefined' || !sonicAudioMonitorState) return null;
   var frame = sonicAudioMonitorState.frame;
@@ -189,14 +192,13 @@ function readSonicRealtimeCameraSample() {
     + (Number(frame.triggerOnset) || 0) * 0.16
     + (Number(frame.triggerPulse) || 0) * 0.18);
   var competing = midBand * 0.58 + highMid * 0.32 + presence * 0.18;
-  return {
-    lowPresence: clamp01(low + kick * 0.26),
-    lowAttack: clampRange(onset * 0.055 + kick * 0.018 + kickDominance * 0.018, 0, 0.14),
-    score: clamp01((Number(frame.kickConfidence) || 0) * 0.52 + onset * 0.30 + kick * 0.16 + kickDominance * 0.12),
-    strength: clamp01(0.34 + kick * 0.26 + low * 0.22 + onset * 0.24),
-    lowDominance: Math.max(0.70, low / Math.max(0.001, competing), 0.78 + kickDominance * 0.70),
-    lowFluxDominance: Math.max(0.96, 0.82 + onset * 1.28 + kickDominance * 0.24)
-  };
+  sonicCameraSampleScratch.lowPresence = clamp01(low + kick * 0.26);
+  sonicCameraSampleScratch.lowAttack = clampRange(onset * 0.055 + kick * 0.018 + kickDominance * 0.018, 0, 0.14);
+  sonicCameraSampleScratch.score = clamp01((Number(frame.kickConfidence) || 0) * 0.52 + onset * 0.30 + kick * 0.16 + kickDominance * 0.12);
+  sonicCameraSampleScratch.strength = clamp01(0.34 + kick * 0.26 + low * 0.22 + onset * 0.24);
+  sonicCameraSampleScratch.lowDominance = Math.max(0.70, low / Math.max(0.001, competing), 0.78 + kickDominance * 0.70);
+  sonicCameraSampleScratch.lowFluxDominance = Math.max(0.96, 0.82 + onset * 1.28 + kickDominance * 0.24);
+  return sonicCameraSampleScratch;
 }
 
 function applyCinemaProfileFromBeatMap(map) {
@@ -362,10 +364,20 @@ function beatAnalysisYieldMs(options, currentMs, prefetchMs) {
   return Math.min(currentMs == null ? 120 : currentMs, 160);
 }
 
+// 频段范围缓存：data.length/sampleRate/fftSize 在一个分析会话内恒定，
+// 只在分析参数变化时重建，避免每个音频帧拼接 5 段字符串 cacheKey
 var beatBandRangeCache = Object.create(null);
+var beatBandRangeProfile = null;
 function beatBandRms(data, sampleRate, fftSize, hz0, hz1) {
   var binHz = sampleRate / fftSize;
-  var cacheKey = data.length + '|' + sampleRate + '|' + fftSize + '|' + hz0 + '|' + hz1;
+  if (!beatBandRangeProfile
+    || beatBandRangeProfile.dataLength !== data.length
+    || beatBandRangeProfile.sampleRate !== sampleRate
+    || beatBandRangeProfile.fftSize !== fftSize) {
+    beatBandRangeProfile = { dataLength: data.length, sampleRate: sampleRate, fftSize: fftSize, cache: Object.create(null) };
+    beatBandRangeCache = beatBandRangeProfile.cache;
+  }
+  var cacheKey = hz0 + '|' + hz1;
   var range = beatBandRangeCache[cacheKey];
   if (!range) {
     range = {
@@ -389,6 +401,19 @@ function beatBandRms(data, sampleRate, fftSize, hz0, hz1) {
   return count ? Math.sqrt(sum / count) : 0;
 }
 
+// 时域 RMS：与 11-main-loop.js 共用同一实现，避免两处逐字节重复的
+// 步进求和循环（行为完全一致，均按实际采样数归一化）
+function computeTimeDomainRms(data) {
+  var stride = (typeof runtimeAnalysisStride === 'function') ? runtimeAnalysisStride('time', data.length) : 1;
+  var sum = 0, count = 0;
+  for (var i = 0; i < data.length; i += stride) {
+    var tv = (data[i] - 128) / 128;
+    sum += tv * tv;
+    count++;
+  }
+  return Math.sqrt(sum / Math.max(1, count));
+}
+
 function processRealtimeBeatEngine(dt) {
   if (!beatAnalyser || !audioCtx || !audio || audio.paused) return null;
   dt = Math.max(0.001, Math.min(0.080, dt || 0.016));
@@ -402,15 +427,7 @@ function processRealtimeBeatEngine(dt) {
   var vocal = beatBandRms(beatFrequencyData, sr, beatAnalyser.fftSize, 420, 2600);
   var snap = beatBandRms(beatFrequencyData, sr, beatAnalyser.fftSize, 1800, 9200);
   var low = Math.min(1, kick * 0.86 + sub * 0.42);
-  var rms = 0;
-  var timeStride = (typeof runtimeAnalysisStride === 'function') ? runtimeAnalysisStride('time', beatTimeDomainData.length) : 1;
-  var rmsCount = 0;
-  for (var i = 0; i < beatTimeDomainData.length; i += timeStride) {
-    var tv = (beatTimeDomainData[i] - 128) / 128;
-    rms += tv * tv;
-    rmsCount++;
-  }
-  rms = Math.sqrt(rms / Math.max(1, rmsCount));
+  var rms = computeTimeDomainRms(beatTimeDomainData);
 
   function follow(cur, next, upTau, downTau) {
     var tau = next > cur ? upTau : downTau;
@@ -546,7 +563,8 @@ function processRealtimeBeatEngine(dt) {
       djMode.tempoGap = rtBeat.tempoGap;
       djMode.tempoConfidence = rtBeat.tempoConfidence;
     }
-    return { hit: false, score: score, low: lowNorm, body: bodyNorm, vocal: vocalNorm, snap: snapNorm, tempoConfidence: rtBeat.tempoConfidence };
+    // 未命中时返回 null（调用方只关心 hit），避免每个音频帧分配对象
+    return null;
   }
 
   var gapShift = 0;

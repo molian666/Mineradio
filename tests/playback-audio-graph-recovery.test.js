@@ -169,7 +169,6 @@ function makeHarness(options = {}) {
     'disconnectAudioGraphNodes',
     'replaceAudioElementForGraphRecovery',
     'resetPlaybackAudioGraphForSourceSwitch',
-    'createPlaybackAudioContext',
     'initAudio',
     'readPlaybackAnalyserSignal',
     'rebuildPlaybackGraphWithCapture',
@@ -391,9 +390,36 @@ function testForcedCaptureWaitsForMediaReadyState() {
   assert.equal(audio.__mineradioQueueItemKey, 'queue-alpha');
 }
 
+function testMediaSourceBoundTrackSwitchCreatesFreshAudioLifetime() {
+  // 回归：被 MediaElementSource 绑定过的元素在切歌时若被复用（反复 disconnect/
+  // rebind/load），Chromium 可能永久冻结媒体时钟（数据就绪但不前进、无声音）。
+  // 与 capture 绑定一样，绑定元素跨切歌必须换新，不能复用旧元素。
+  const { context, audio, calls } = makeHarness({ allowReplacement: true });
+  const originalAudio = audio;
+
+  assert.equal(context.initAudio(), true);
+  assert.equal(context.source.__mineradioUsesCapture, false, 'test must start with the MediaElementSource lifetime binding');
+  assert.equal(audio.__mineradioMediaSourceBound, true);
+  assert.equal(calls.createMediaElementSource, 1);
+
+  context.resetPlaybackAudioGraphForSourceSwitch('test-ms-bound-track-switch');
+  const freshAudio = context.audio;
+
+  assert.notStrictEqual(freshAudio, originalAudio, 'MediaElementSource-bound element must be replaced on track switch instead of reused');
+  assert.equal(calls.replace, 1, 'MediaElementSource-bound track switch did not perform one controlled replacement');
+  assert.deepEqual(calls.replaceReasons, ['test-ms-bound-track-switch']);
+  assert.equal(calls.audioConstruct, 1);
+  assert.equal(calls.createMediaElementSource, 1, 'old element must not be re-bound after replacement');
+  assert.equal(originalAudio.paused, true, 'old bound element must be paused before replacement');
+  assert.equal(freshAudio.__mineradioQueueItemKey, 'queue-alpha', 'fresh Audio lost queue identity');
+  assert.equal(freshAudio.src, '', 'fresh Audio must not inherit the old track URL');
+  assert.equal(freshAudio.currentSrc, '', 'fresh Audio must not inherit the old currentSrc');
+}
+
 testCaptureTrackSwitchCreatesFreshAudioLifetime();
 testFrozenClockDoesNotTriggerCaptureRebuild();
 testTwoAdvancingSilentSamplesTriggerCaptureRebuild();
 testTransientCaptureSourceFailureRetainsForcedCaptureRetry();
 testForcedCaptureWaitsForMediaReadyState();
+testMediaSourceBoundTrackSwitchCreatesFreshAudioLifetime();
 console.log('OK playback-audio-graph-recovery');

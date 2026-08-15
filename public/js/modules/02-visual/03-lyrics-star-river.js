@@ -1,10 +1,14 @@
-var lyricsParticles = null;
-var lyricsGeo = null;
-
-// 三个 attribute: 源位置(随机扩散态), 目标位置(组成字), color, brightness
-var lyricsAttrTargetA = null;
-var lyricsAttrTargetB = null;
-var lyricsAttrSeed = null;
+// 歌词星河每帧使用的颜色缓存：palette 字符串不变时复用 THREE.Color，
+// 避免每帧（45fps 门控）重复做正则解析与对象分配
+var starRiverColorACache = { key: '', color: null };
+var starRiverColorBCache = { key: '', color: null };
+function cachedStarRiverColor(cache, css, fallback, minLum) {
+  if (cache.key !== css) {
+    cache.key = css;
+    cache.color = lyricThreeColor(css, fallback, minLum);
+  }
+  return cache.color;
+}
 
 function createLyricsParticles() {
   if (stageLyrics.group) {
@@ -102,15 +106,6 @@ function ensureLyricStarRiver() {
   return points;
 }
 
-function disposeLyricStarRiver() {
-  var river = stageLyrics && stageLyrics.starRiver;
-  if (!river) return;
-  if (river.parent) river.parent.remove(river);
-  if (river.geometry) river.geometry.dispose();
-  if (river.material) river.material.dispose();
-  stageLyrics.starRiver = null;
-}
-
 function updateLyricStarRiver(dt) {
   var river = ensureLyricStarRiver();
   if (!river || !river.material || !river.material.uniforms) return;
@@ -133,8 +128,8 @@ function updateLyricStarRiver(dt) {
     ? clampRange(0.22 + lyricGlowStrength * 0.58 + stageLyrics.highBloom * 0.16 + stageLyrics.beatGlow * 0.12, 0.16, 0.86)
     : 0;
   u.uOpacity.value += (targetOpacity - u.uOpacity.value) * (targetOpacity > u.uOpacity.value ? 0.10 : 0.055);
-  u.uColorA.value.copy(lyricThreeColor(stageLyrics.palette.secondary || stageLyrics.palette.primary, '#9cffdf', 0.42));
-  u.uColorB.value.copy(lyricThreeColor(stageLyrics.palette.highlight || stageLyrics.palette.primary, '#fff7d2', 0.46));
+  u.uColorA.value.copy(cachedStarRiverColor(starRiverColorACache, stageLyrics.palette.secondary || stageLyrics.palette.primary, '#9cffdf', 0.42));
+  u.uColorB.value.copy(cachedStarRiverColor(starRiverColorBCache, stageLyrics.palette.highlight || stageLyrics.palette.primary, '#fff7d2', 0.46));
   river.visible = u.uOpacity.value > 0.01 || !!stageLyrics.current;
   var t = uniforms.uTime.value;
   river.position.y += ((0.18 + Math.sin(t * 0.44) * 0.035 + Math.sin(t * 0.91 + 1.7) * 0.018) - river.position.y) * 0.08;

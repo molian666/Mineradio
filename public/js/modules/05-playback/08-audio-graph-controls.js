@@ -81,6 +81,14 @@ function resetPlaybackAudioGraphForSourceSwitch(reason) {
     replaceAudioElementForGraphRecovery(reason || 'capture-track-switch', { preservePlayback: false });
     return;
   }
+  // 同一个被 MediaElementSource 绑定过的元素在多次切歌间复用（反复 disconnect/
+  // rebind 与 load()）同样会让 Chromium 冻结媒体时钟：数据全部就绪（readyState 4）
+  // 但 currentTime 永远停在 0、无声音。任何已有绑定关系的元素在切歌时一律换新，
+  // 避免复用被"毒化"的旧元素（每个 Audio 只建立一次干净的 MediaElementSource）。
+  if (source && previousSourceMedia === audio) {
+    replaceAudioElementForGraphRecovery(reason || 'track-switch-fresh-element', { preservePlayback: false });
+    return;
+  }
   disconnectAudioGraphNodes(!sourceUsesCapture && !mediaElementChanged);
   if (
     preparedGraph
@@ -103,25 +111,17 @@ function resetPlaybackAudioGraphForSourceSwitch(reason) {
     audioReady = true;
   }
 }
-function createPlaybackAudioContext() {
-  var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextCtor) return null;
-  try {
-    // 蓝牙/无线耳机对输出欠载极敏感：默认交互级缓冲偏小，CPU/传输抖动
-    // 会直接表现为断续。latencyHint 'playback' 让 Chromium 选择更大的
-    // 输出缓冲来换取稳定（播放器无音画同步需求，延迟增加不可感知）。
-    return new AudioContextCtor({ latencyHint: 'playback' });
-  } catch (e) {
-    try { return new AudioContextCtor(); } catch (e2) { return null; }
-  }
-}
 function initAudio() {
   if (!audio) return false;
   if (audioGraphHealthy()) return true;
   var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextCtor) return false;
   if (audioCtx && audioCtx.state === 'closed') replaceAudioElementForGraphRecovery('closed-context');
-  if (!audioCtx || audioCtx.state === 'closed') audioCtx = createPlaybackAudioContext();
+  // 注意：不要用 latencyHint 'playback' 或任何加大输出缓冲的方式创建此上下文。
+  // 本机实测 --audio-buffer-size=4096 会冻结 Chromium 媒体时钟（数据就绪但
+  // currentTime 停在 0、无声）；WebAudio 的 'playback' 提示同样会把目标缓冲
+  // 放大到约 4096 帧（2×默认），属于同一风险类，保持 Chromium 平台默认缓冲。
+  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContextCtor();
   var keepSource = !!(source && audioSourceMedia === audio && source.context === audioCtx && audioCtx.state !== 'closed');
   var sourceUsesCapture = !!(keepSource && source.__mineradioUsesCapture);
   disconnectAudioGraphNodes(keepSource);
@@ -144,7 +144,7 @@ function initAudio() {
     }
     if (!forceCapture && !mediaSource && audio.__mineradioMediaSourceBound) {
       replaceAudioElementForGraphRecovery('media-source-rebind');
-      if (!audioCtx || audioCtx.state === 'closed') audioCtx = createPlaybackAudioContext();
+      if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContextCtor();
       try {
         mediaSource = audioCtx.createMediaElementSource(audio);
       } catch (rebindingErr) {

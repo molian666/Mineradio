@@ -103,7 +103,16 @@ function playbackResumePausedLongEnough(song) {
 function trackSwitchStallRecoveryAllowed(song, opts) {
   opts = opts || {};
   if (!opts.trackSwitch || opts.resumeRecovery) return true;
-  return playbackResumeProvider(song) === 'qishui';
+  if (playbackResumeProvider(song) === 'qishui') return true;
+  // 非汽水平台的切歌/新歌同样必须允许停滞恢复：当取链返回的 URL 无法产生任何
+  // 音频数据时（第三方音源下线、平台链接过期、代理上游挂起等），播放器会一直
+  // 停留在"显示播放中但无声无进度"的假播放状态。是否真的停滞由看门狗回调内
+  // 的数据/前进条件判定（正常缓冲的切歌会在 advance/readyState 检查时直接
+  // 跳过），这里只放开调度门槛。
+  var media = opts.ownerMedia || audio;
+  if (!media || !media.src) return false;
+  if (media.paused || media.ended || media.seeking) return false;
+  return true;
 }
 
 function isQishuiTrackStartStalled(song, opts, media, startTime, current) {
@@ -302,7 +311,7 @@ function schedulePlaybackStallRecovery(reason, opts) {
         if (await nudgeQishuiTrackStart(media, src, token)) return;
         return;
       }
-      if (delayMs < 3000 && media.readyState >= 2 && media.networkState !== media.NETWORK_NO_SOURCE) return;
+      if (delayMs < 3000 && media.readyState >= 2 && current > startTime && media.networkState !== media.NETWORK_NO_SOURCE) return;
       try {
         await ensurePlaybackAudioGraph('resume-stall-before-refresh');
         ensureAudiblePlaybackGain('resume-stall-before-refresh');

@@ -156,6 +156,8 @@ function effectivePlaybackQualityForSong(song, provider, requested) {
   var cap = playbackQualityCapValue(song, provider);
   return playbackQualityAboveCap(q, provider, cap) ? cap : q;
 }
+var PLAYBACK_QUALITY_CAPS_MAX_ENTRIES = 240;
+var PLAYBACK_QUALITY_CAPS_TTL_MS = 2 * 60 * 60 * 1000;
 function markPlaybackQualityRuntimeCap(song, provider, ceiling, reason) {
   provider = normalizePlaybackProvider(provider || songProviderKey(song));
   if (!song || !ceiling) return false;
@@ -170,8 +172,32 @@ function markPlaybackQualityRuntimeCap(song, provider, ceiling, reason) {
     reason: reason || '',
     at: Date.now()
   };
+  prunePlaybackQualityRuntimeCaps();
   updatePlaybackQualityUi();
   return true;
+}
+// 运行期音质上限表按会话内的唯一歌曲累计；长会话下防止无界增长，
+// 只在超过阈值时按 TTL 清理，并对最旧条目做硬上限兜底。
+function prunePlaybackQualityRuntimeCaps() {
+  var keys = Object.keys(playbackQualityRuntimeCaps);
+  if (keys.length <= PLAYBACK_QUALITY_CAPS_MAX_ENTRIES) return;
+  var cutoff = Date.now() - PLAYBACK_QUALITY_CAPS_TTL_MS;
+  keys.forEach(function (key) {
+    var entry = playbackQualityRuntimeCaps[key];
+    if (entry && entry.at < cutoff) delete playbackQualityRuntimeCaps[key];
+  });
+  keys = Object.keys(playbackQualityRuntimeCaps);
+  while (keys.length > PLAYBACK_QUALITY_CAPS_MAX_ENTRIES) {
+    var oldestKey = null;
+    var oldestAt = Infinity;
+    keys.forEach(function (key) {
+      var entry = playbackQualityRuntimeCaps[key];
+      if (entry && entry.at < oldestAt) { oldestAt = entry.at; oldestKey = key; }
+    });
+    if (!oldestKey) break;
+    delete playbackQualityRuntimeCaps[oldestKey];
+    keys = Object.keys(playbackQualityRuntimeCaps);
+  }
 }
 function playbackBitrateLabel(br) {
   br = Number(br) || 0;
@@ -640,7 +666,15 @@ function renderAudioOutputDeviceUi() {
     if (item.id === (audioOutputDeviceId || '')) return 3;
     return 2;
   });
-  var primaryHtml = primaryItems.map(function (item) {
+  // Patch Bay 工作台仅在弹窗打开时需要重建（每次切歌都会走到这里）；关闭时
+  // 跳过整段 HTML 拼接与 SVG 连线重绘，打开弹窗时 openAudioOutputWorkflowPanel
+  // 会重新渲染，因此不会出现内容过期。
+  var workflowModal = document.getElementById('audio-output-workflow-modal');
+  var workflowModalOpen = !!(workflowModal && workflowModal.classList.contains('show'));
+  var primaryHtml = '';
+  var mirrorHtml = '';
+  if (workflowModalOpen) {
+  primaryHtml = primaryItems.map(function (item) {
     var device = item.device;
     var index = item.index;
     var id = device && device.deviceId ? String(device.deviceId) : '';
@@ -650,7 +684,7 @@ function renderAudioOutputDeviceUi() {
       '<span class="flow-port in" data-output-primary-target="' + escHtml(id) + '" title="连接为主输出"></span><span class="route-node-icon">' + (id ? 'OUT' : 'SYS') + '</span><span class="route-node-text"><b>' + escHtml(audioOutputDeviceLabel(device, index)) + '</b><small>' + (active ? '主输出已连接' : '拖线连接主输出') + '</small></span>' +
       '<span class="route-node-pulse"></span></button>';
   }).join('');
-  var mirrorHtml = mirrorItems.map(function (item) {
+  mirrorHtml = mirrorItems.map(function (item) {
     var device = item.device;
     var index = item.index;
     var id = String(device.deviceId || '');
@@ -663,6 +697,7 @@ function renderAudioOutputDeviceUi() {
       '<span class="flow-port in" data-output-mirror-target="' + escHtml(id) + '" title="连接为实验镜像监听"></span><span class="route-node-icon">MON</span><span class="route-node-text"><b>' + escHtml(audioOutputDeviceLabel(device, index)) + '</b><small>' + escHtml(audioOutputMirrorStatusText(id, active, disabled)) + '</small></span>' +
       '<span class="route-node-pulse"></span></button>';
   }).join('');
+  }
   var bridgeDevice = bridgeId ? audioOutputDeviceById(bridgeId) : null;
   var bridgeLabel = bridgeDevice ? audioOutputDeviceLabel(bridgeDevice, 0) : '未检测到 VB-CABLE / VoiceMeeter';
   var inputHint = (audioInputDevices || []).slice(0, 2).map(function (device, index) { return audioInputDeviceLabel(device, index); }).join(' / ');
@@ -671,7 +706,9 @@ function renderAudioOutputDeviceUi() {
   var mirrorCount = mirrorIds.filter(function (id) { return id && id !== (audioOutputDeviceId || ''); }).length;
   var mirrorConfirmedCount = audioOutputMirrorConfirmedCount(mirrorIds);
   var mirrorStateLabel = mirrorCount ? (mirrorConfirmedCount ? ('已确认 ' + mirrorConfirmedCount + '/' + mirrorCount) : ('待确认 ' + mirrorCount + ' 路')) : '关闭';
-  var workflowHtml =
+  var workflowHtml = '';
+  if (workflowModalOpen) {
+  workflowHtml =
     '<div class="audio-route-graph' + (bridgeEnabled ? ' bridge-on' : '') + '">' +
       '<svg id="audio-route-workflow-svg" class="workflow-link-layer audio-link-layer" aria-hidden="true"></svg>' +
       '<div class="audio-flow-source workflow-node" data-audio-node="player">' +
@@ -697,6 +734,7 @@ function renderAudioOutputDeviceUi() {
         '</div>' +
       '</div>' +
     '</div>';
+  }
   var workflowSubtitle = document.getElementById('audio-output-workflow-subtitle');
   if (workflowSubtitle) workflowSubtitle.textContent = summaryText;
   list.innerHTML =
@@ -708,8 +746,10 @@ function renderAudioOutputDeviceUi() {
       '<span class="audio-output-summary-action">路由</span>' +
     '</button>';
   var workflowBody = document.getElementById('audio-output-workflow-body');
-  if (workflowBody) workflowBody.innerHTML = workflowHtml;
-  requestAnimationFrame(function () { renderAudioRouteWorkflowEdges(); });
+  if (workflowBody && workflowModalOpen) {
+    workflowBody.innerHTML = workflowHtml;
+    requestAnimationFrame(function () { renderAudioRouteWorkflowEdges(); });
+  }
 }
 function openAudioOutputWorkflowPanel() {
   var modal = document.getElementById('audio-output-workflow-modal');
