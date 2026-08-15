@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast job: full node:test suite + quick-check static guards + whitespace.
+  # Everything here is source-level (Node builtins only), so it runs on any OS
+  # and does not need the Electron binary (download skipped for speed).
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests & static checks
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+        # Electron 42 ships no postinstall script, so npm ci never downloads
+        # the ~120 MB binary; electron-builder fetches its own copy into the
+        # electron-builder cache during the build job. Tests only exercise
+        # source-level code, so the test job stays small and fast.
+
+      - name: Run node:test suite
+        run: npm test
+
+      - name: Run quick-check (node --check full + contract guards)
+        run: node scripts/quick-check.js
+
+      - name: Check whitespace errors (git diff --check)
+        shell: bash
+        run: |
+          BASE=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="$(git merge-base HEAD "origin/${{ github.base_ref }}")"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "No valid base commit; skipping git diff --check."
+            exit 0
+          fi
+          git diff --check "$BASE"...HEAD
+          echo "git diff --check passed."
+
+  # ---------------------------------------------------------------------------
+  # Slow job: electron-builder --win dir packaging smoke. Must run on Windows
+  # (after-pack.js injects resources with the rcedit-x64.exe binary).
+  # ---------------------------------------------------------------------------
+  build:
+    name: Windows build smoke
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Cache Electron downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\Users\runneradmin\AppData\Local\electron-builder\Cache
+            C:\Users\runneradmin\AppData\Local\electron\Cache
+          key: electron-cache-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unpacked app (smoke)
+        run: npm run build:win:dir
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $exe = "dist/win-unpacked/Mineradio.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Build output missing: $exe"
+          }
+          Write-Host "Build smoke OK: $exe"

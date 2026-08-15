@@ -7,6 +7,8 @@
     <a href="https://github.com/molian666/Mineradio/releases">版本发布</a>
     ·
     <a href="./LICENSE">GPL-3.0-only</a>
+    ·
+    <a href="https://github.com/molian666/Mineradio/actions/workflows/ci.yml"><img src="https://github.com/molian666/Mineradio/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   </p>
 </div>
 
