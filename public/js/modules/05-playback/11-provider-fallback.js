@@ -126,7 +126,7 @@ function playbackRestrictionNotice(song, data) {
     return {
       category: category,
       title: '当前平台未登录',
-      body: (message || (provider + ' 需要登录后才能获取播放地址。')) + ' 正在打开对应登录入口。',
+      body: (message || (provider + ' 需要登录后才能获取播放地址。')) + (loggedIn ? ' 正在打开对应登录入口。' : ' 未登录时自动跳过该歌曲，可点击右上角账号登录后播放。'),
       action: 'login',
       toast: '当前平台未登录'
     };
@@ -665,7 +665,20 @@ async function tryAutoPlaybackFallback(song, data, idx, token, opts) {
   var category = playbackRestrictionCategory(song, data);
   var fromLabel = playbackProviderLabel(song);
   var alternateProviders = alternatePlaybackProviders(song);
-  if (!alternateProviders.length && category === 'login_required') return null;
+  // 未登录账号播放热歌榜/队列遇到"需要登录"的歌曲时，不弹登录窗打断播放：
+  // 与"不登录也可以搜索和播放"一致，走下方跳过分支继续队列；只有账号已存在
+  // 但授权不完整/会话失效（平台状态已登录 / data.loggedIn / 缺播放授权）时才
+  // 返回 null，由上层引导重新登录。
+  if (!alternateProviders.length && category === 'login_required') {
+    var loginRequiredProvider = playbackLoginProvider(song);
+    var loginRequiredStatus = platformStatus(loginRequiredProvider) || {};
+    var accountNeedsReauth = !!(
+      loginRequiredStatus.loggedIn
+      || (data && data.loggedIn)
+      || playbackRestrictionMissingPlaybackKey(data)
+    );
+    if (accountNeedsReauth) return null;
+  }
   var recovery = ensureSourceFallbackRecovery(opts, song, idx, token);
   if (!recovery) return false;
   opts = Object.assign({}, opts, { sourceFallbackRecovery: recovery });
@@ -681,7 +694,10 @@ async function tryAutoPlaybackFallback(song, data, idx, token, opts) {
     return settleSourceFallbackTerminal(idx, token, '自动恢复已达到时间上限，请稍后手动重试。', skipOpts);
   }
   if (!alternateProviders.length) {
-    return await skipFailedQueueItem(idx, token, '当前歌曲不可播放，且没有其它已登录、已授权的音乐平台可接管。', skipOpts);
+    var loginSkipMessage = category === 'login_required'
+      ? '当前歌曲需要登录对应平台才能播放，请登录后重试或播放其它歌曲。'
+      : '当前歌曲不可播放，且没有其它已登录、已授权的音乐平台可接管。';
+    return await skipFailedQueueItem(idx, token, loginSkipMessage, skipOpts);
   }
   if (!opts.startupAutoplay) {
     showSourceFallbackNotice('正在自动换源', fromLabel + ' 当前不可播，正在检查 ' + alternateProviders.map(sourceFallbackProviderTitle).join('、') + ' 的同名同歌手版本。');

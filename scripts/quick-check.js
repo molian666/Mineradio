@@ -1334,11 +1334,12 @@ function checkLyricScrollPerformanceGuard() {
     !/function canResumePausedAudioFast/.test(controlsText) ||
     !/function resumePausedAudioFast/.test(controlsText) ||
     !/function schedulePausedAudioResumeMaintenance/.test(controlsText) ||
-    !/var fastResume = await resumePausedAudioFast\(opts\);[\s\S]{0,80}if \(fastResume === true\) return true;[\s\S]{0,140}if \(!audioGraphHealthy\(\)\) initAudio\(\);/.test(controlsText) ||
-    !/restorePlaybackGain\(\);[\s\S]{0,120}await awaitMediaPlayWithTimeout\(media, media\.play\(\), token\);/.test(controlsText) ||
+    !/var fastResume = await resumePausedAudioFast\(opts\);[\s\S]{0,120}if \(fastResume === true\) return true;/.test(controlsText) ||
+    !/RESUME_FAST_PLAY_TIMEOUT_MS/.test(controlsText) ||
+    !/restorePlaybackGain\(\);[\s\S]{0,200}await awaitMediaPlayWithTimeout\(media, media\.play\(\), token, RESUME_FAST_PLAY_TIMEOUT_MS\);/.test(controlsText) ||
     !/setTimeout\(async function \(\) \{[\s\S]{0,240}ensurePlaybackAudioGraph\(\(reason \|\| 'manual-resume-fast'\) \+ '-deferred-graph'\)/.test(controlsText)
   ) {
-    fail('space/button pause resume must use a fast paused-audio path and defer graph maintenance off the input frame');
+    fail('space/button pause resume must use a fast bounded paused-audio path and defer graph maintenance off the input frame');
   }
   console.log('[OK] Lyric scrolling keeps one persistent whole-song text runway, bounded effect layers, realtime continuous drag, and warm lyric activation.');
 }
@@ -2726,8 +2727,8 @@ function checkPlaybackResumeRecoveryGuard() {
   if (!/function recoverCurrentTrackPlaybackFromFreshUrl/.test(controlsText) || !/playQueueAt\(currentIdx,[\s\S]{0,260}resumeRecovery: true/.test(controlsText)) {
     fail('long-pause recovery must refresh the current provider URL and resume from the old position');
   }
-  if (!/function updatePlaybackResumePauseMarker/.test(controlsText) || !/function playbackResumePausedLongEnough/.test(controlsText) || !/recoverCurrentTrackPlaybackFromFreshUrl\('long-pause-stale-source'/.test(controlsText) || !/updatePlaybackResumePauseMarker\(reason\)/.test(fs.readFileSync(path.join(appRoot, 'public', 'js', 'modules', '05-playback', '12-playback-switch-core.js'), 'utf8'))) {
-    fail('manual resume after a long pause must refresh stale provider URLs before trying the old audio src');
+  if (!/function updatePlaybackResumePauseMarker/.test(controlsText) || !/function playbackResumePausedLongEnough/.test(controlsText) || !/'long-pause-stale-source'/.test(controlsText) || !/'manual-resume-stalled'/.test(controlsText) || !/recoverCurrentTrackPlaybackFromFreshUrl\(staleLongPause/.test(controlsText) || !/updatePlaybackResumePauseMarker\(reason\)/.test(fs.readFileSync(path.join(appRoot, 'public', 'js', 'modules', '05-playback', '12-playback-switch-core.js'), 'utf8'))) {
+    fail('manual resume must try the fast paused-audio path first and refresh stale provider URLs when the old src fails to start');
   }
   if (!/function schedulePlaybackStallRecovery/.test(controlsText) || !/ensureAudiblePlaybackGain\('resume-stall-before-refresh'\)/.test(controlsText) || !/recoverCurrentTrackPlaybackFromFreshUrl\('play-rejected'/.test(controlsText)) {
     fail('playback resume recovery must cover rejected play() and stalled media after WebAudio checks');

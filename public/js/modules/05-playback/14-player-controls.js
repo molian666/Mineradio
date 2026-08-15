@@ -328,6 +328,11 @@ function playbackAttemptStillCurrent(media, token) {
   return !!(media && audio === media && token === trackSwitchToken);
 }
 var AUDIO_PLAY_REQUEST_TIMEOUT_MS = 9000;
+// 暂停后恢复播放的快速路径超时：暂停的 <audio> 若缓冲仍有效，play() 几乎瞬时
+// 返回；一旦超过该预算仍无进展，说明旧流已不可用（代理连接被断开、平台链接
+// 过期、汽水加密缓存被逐出等）。此时应立即转入重新取链通道并给出可见反馈，
+// 而不是继续空等默认的 9 秒超时，造成"点了继续播放没反应"。
+var RESUME_FAST_PLAY_TIMEOUT_MS = 3500;
 function awaitMediaPlayWithTimeout(media, playPromise, token, timeoutMs) {
   timeoutMs = Math.max(1000, Number(timeoutMs) || AUDIO_PLAY_REQUEST_TIMEOUT_MS);
   return new Promise(function (resolve, reject) {
@@ -424,7 +429,7 @@ async function resumePausedAudioFast(opts) {
   var token = trackSwitchToken;
   try {
     restorePlaybackGain();
-    await awaitMediaPlayWithTimeout(media, media.play(), token);
+    await awaitMediaPlayWithTimeout(media, media.play(), token, RESUME_FAST_PLAY_TIMEOUT_MS);
     if (!isSameAudioPlaybackTarget(media, src) || token !== trackSwitchToken) return false;
     switchPlaybackVisualToEmily();
     playing = true; setPlayIcon(true);
@@ -473,18 +478,57 @@ async function attemptAudioPlay(opts) {
   try {
     if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) return false;
     var currentSongForResume = playQueue && currentIdx >= 0 && currentIdx < playQueue.length ? playQueue[currentIdx] : null;
-    if (opts.manual && !opts.trackSwitch && !opts.resumeRecovery && audio && audio.src && audio.paused && !audio.ended && playbackResumePausedLongEnough(currentSongForResume)) {
-      var staleResumeAt = currentResumeSeconds(playbackResumeRecovery && playbackResumeRecovery.pausedPosition);
-      var refreshedResume = await recoverCurrentTrackPlaybackFromFreshUrl('long-pause-stale-source', {
-        resumeAt: staleResumeAt,
-        silent: opts.silent !== false
-      });
-      if (refreshedResume) return true;
-    }
-    if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) return false;
+    var pausedElementResume = !!(
+      opts.manual &&
+      !opts.trackSwitch &&
+      !opts.resumeRecovery &&
+      audio &&
+      audio.src &&
+      audio.paused &&
+      !audio.ended &&
+      playbackMediaMatchesCurrentQueueItem(audio)
+    );
+    // 手动恢复播放：先给即时反馈，避免"点了播放没反应"的错觉。
+    if (pausedElementResume) showLoading({});
+    // 先尝试快速恢复：暂停的 <audio> 缓冲仍有效时几乎瞬时启动。若在短预算内
+    // 未启动，说明旧流已不可用，再转入重新取链通道（带加载反馈），而不是对
+    // 同一元素再空等一个长超时。
     var fastResume = await resumePausedAudioFast(opts);
     if (fastResume === true) return true;
-    if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) return false;
+    if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) {
+      hideLoading();
+      return false;
+    }
+    if (pausedElementResume) {
+      // 快速恢复未在 RESUME_FAST_PLAY_TIMEOUT_MS 内启动：旧播放链接/流已失效
+      // （代理连接被断开、平台链接过期、汽水加密缓存被逐出等）。直接重新取链
+      // 并回到原进度。
+      if (canRefreshCurrentPlaybackUrlForResume(currentSongForResume)) {
+        var staleLongPause = playbackResumePausedLongEnough(currentSongForResume);
+        var refreshedResume = await recoverCurrentTrackPlaybackFromFreshUrl(staleLongPause ? 'long-pause-stale-source' : 'manual-resume-stalled', {
+          resumeAt: currentResumeSeconds(playbackResumeRecovery && playbackResumeRecovery.pausedPosition),
+          silent: opts.silent !== false
+        });
+        if (refreshedResume) return true;
+        if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) {
+          hideLoading();
+          return false;
+        }
+      }
+      // 本地文件等无法重新取链的场景：对原元素做一次带短超时的直接播放尝试。
+      if (!audioGraphHealthy()) initAudio();
+      if (opts.fade !== false) preparePlaybackFadeIn();
+      var directResumePlay = expectedMedia.play();
+      await applyAudioOutputDevice(expectedMedia);
+      if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) {
+        Promise.resolve(directResumePlay).catch(function () { });
+        return false;
+      }
+      await ensurePlaybackAudioGraph('manual-resume-after-direct-play-request');
+      await awaitMediaPlayWithTimeout(expectedMedia, directResumePlay, expectedToken, RESUME_FAST_PLAY_TIMEOUT_MS);
+      if (!playbackAttemptStillCurrent(expectedMedia, expectedToken)) return false;
+      return await completeAudioPlayStart(opts, 'manual-resume-direct-started', expectedMedia, expectedToken);
+    }
     if (!audioGraphHealthy()) initAudio();
     if (opts.fade !== false) preparePlaybackFadeIn();
     if (opts.manual || opts.trackSwitch) {

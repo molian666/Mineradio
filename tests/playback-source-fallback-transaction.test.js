@@ -258,11 +258,58 @@ function testStaticRecoveryWiring() {
   assert(!/sourceFallbackRecovery/.test(nextTrackBlock), 'natural ended next starts a fresh playback root');
 }
 
+async function testLoginRequiredWithoutAccountSkipsInsteadOfModal() {
+  // 未登录播放热歌榜/队列时，login_required 歌曲不应弹登录窗打断播放：
+  // 应像其它不可播类别一样跳过并继续队列（回归：热歌榜每首歌都弹登录窗）。
+  const queue = [
+    { provider: 'qq', id: 'vip-1', name: 'VIP Song 1', artist: 'Artist' },
+    { provider: 'qq', id: 'vip-2', name: 'VIP Song 2', artist: 'Artist' },
+    { provider: 'qq', id: 'vip-3', name: 'VIP Song 3', artist: 'Artist' },
+  ];
+  const sandbox = createSandbox(queue, {
+    netease: { loggedIn: false },
+    qq: { loggedIn: false, playbackKeyReady: false },
+    kugou: { loggedIn: false, playbackKeyReady: false },
+  });
+  let childCalls = 0;
+  sandbox.playQueueAt = async function (idx, opts) {
+    childCalls++;
+    sandbox.currentIdx = idx;
+    sandbox.trackSwitchToken++;
+    return sandbox.tryAutoPlaybackFallback(
+      sandbox.playQueue[idx],
+      { category: 'login_required', restriction: { category: 'login_required' } },
+      idx,
+      sandbox.trackSwitchToken,
+      opts
+    );
+  };
+  const result = await sandbox.tryAutoPlaybackFallback(queue[0], { category: 'login_required', restriction: { category: 'login_required' } }, 0, 1, {});
+  assert.notStrictEqual(result, null, 'not-logged-in login_required must be handled by the queue skip path, not return null');
+  assert.strictEqual(childCalls, 2, 'login-required songs must be skipped and the queue advanced');
+  assert(sandbox.notices.some(item => item.title === '已跳过受限歌曲'), 'login-required skip must show a notice');
+  assert(!sandbox.notices.some(item => item.title === '当前平台未登录'), 'login-required skip must not open the login modal');
+}
+
+async function testLoginRequiredWithStaleAccountStillReturnsNull() {
+  // 账号已登录但会话失效/缺播放授权时，login_required 仍返回 null 走登录引导。
+  const song = { provider: 'qq', id: 'vip-stale', name: 'VIP Stale', artist: 'Artist' };
+  const sandbox = createSandbox([song], {
+    netease: { loggedIn: false },
+    qq: { loggedIn: true, playbackKeyReady: false },
+    kugou: { loggedIn: false, playbackKeyReady: false },
+  });
+  const result = await sandbox.tryAutoPlaybackFallback(song, { category: 'login_required', restriction: { category: 'login_required', missingPlaybackKey: true } }, 0, 1, {});
+  assert.strictEqual(result, null, 'stale logged-in session must keep the login modal path');
+}
+
 async function run() {
   await testFiniteQueueRecovery();
   await testDuplicateSongProviderDeduplication();
   await testLateAsyncCannotReviveTerminal();
   await testDeadlineAndManualSupersession();
+  await testLoginRequiredWithoutAccountSkipsInsteadOfModal();
+  await testLoginRequiredWithStaleAccountStillReturnsNull();
   testStaticRecoveryWiring();
   console.log('OK playback-source-fallback-transaction');
 }

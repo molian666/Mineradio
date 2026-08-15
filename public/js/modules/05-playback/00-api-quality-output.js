@@ -881,8 +881,14 @@ async function applyAudioOutputDevice(media) {
   async function applySink(target, label) {
     if (!target) return null;
     if (typeof target.setSinkId !== 'function') return false;
+    // 蓝牙耳机每次 setSinkId 都可能触发设备重新协商/短暂断流。同一目标已
+    // 应用过相同 sink 时直接跳过，避免每次切歌/恢复播放都重路由输出。
+    var appliedSink = target.__mineradioAppliedSinkId;
+    if (appliedSink === sinkId) return true;
+    if (sinkId === '' && appliedSink == null) return true;
     try {
       await target.setSinkId(sinkId);
+      target.__mineradioAppliedSinkId = sinkId;
       return true;
     } catch (e) {
       errors.push({ label: label, error: e });

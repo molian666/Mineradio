@@ -14,15 +14,15 @@ async function analyzeAudioBeats(audioUrl, durationSec, token, options) {
     var ab = await resp.arrayBuffer();
     if (token !== beatMapToken) { hideBeatChip(); return null; }
 
-    // 用临时 AudioContext 解码 (我们不能复用 audioCtx 因为它可能 closed)
+    // 解码用离线上下文，不创建真实音频输出流。蓝牙耳机（A2DP）下，
+    // 每次切歌临时 new AudioContext 再 close 会反复重建音频服务的设备流，
+    // 容易在切歌/预取节奏时造成播放断续。
     var TmpCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
     if (!TmpCtx) { hideBeatChip(); return null; }
-    var DecodeCtx = window.AudioContext || window.webkitAudioContext;
-    var dc = new DecodeCtx();
+    var dc = new TmpCtx(1, 1, 44100);
     var buffer = await new Promise(function (resolve, reject) {
       dc.decodeAudioData(ab.slice(0), resolve, reject);
     }).catch(function (e) { console.warn('decode failed:', e); return null; });
-    dc.close && dc.close();
     if (!buffer) { hideBeatChip(); return null; }
     if (token !== beatMapToken) { hideBeatChip(); return null; }
 

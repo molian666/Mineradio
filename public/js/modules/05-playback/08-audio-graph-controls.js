@@ -103,13 +103,25 @@ function resetPlaybackAudioGraphForSourceSwitch(reason) {
     audioReady = true;
   }
 }
+function createPlaybackAudioContext() {
+  var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) return null;
+  try {
+    // 蓝牙/无线耳机对输出欠载极敏感：默认交互级缓冲偏小，CPU/传输抖动
+    // 会直接表现为断续。latencyHint 'playback' 让 Chromium 选择更大的
+    // 输出缓冲来换取稳定（播放器无音画同步需求，延迟增加不可感知）。
+    return new AudioContextCtor({ latencyHint: 'playback' });
+  } catch (e) {
+    try { return new AudioContextCtor(); } catch (e2) { return null; }
+  }
+}
 function initAudio() {
   if (!audio) return false;
   if (audioGraphHealthy()) return true;
   var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextCtor) return false;
   if (audioCtx && audioCtx.state === 'closed') replaceAudioElementForGraphRecovery('closed-context');
-  if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContextCtor();
+  if (!audioCtx || audioCtx.state === 'closed') audioCtx = createPlaybackAudioContext();
   var keepSource = !!(source && audioSourceMedia === audio && source.context === audioCtx && audioCtx.state !== 'closed');
   var sourceUsesCapture = !!(keepSource && source.__mineradioUsesCapture);
   disconnectAudioGraphNodes(keepSource);
@@ -132,7 +144,7 @@ function initAudio() {
     }
     if (!forceCapture && !mediaSource && audio.__mineradioMediaSourceBound) {
       replaceAudioElementForGraphRecovery('media-source-rebind');
-      if (!audioCtx || audioCtx.state === 'closed') audioCtx = new AudioContextCtor();
+      if (!audioCtx || audioCtx.state === 'closed') audioCtx = createPlaybackAudioContext();
       try {
         mediaSource = audioCtx.createMediaElementSource(audio);
       } catch (rebindingErr) {

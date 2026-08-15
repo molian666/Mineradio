@@ -1211,7 +1211,12 @@ async function playQueueAt(idx, opts) {
       }
       return localStarted === true;
     }
-    safePlaybackStep('show-loading', function () { showLoading({ trackSwitch: true, seamlessCover: true }); });
+    safePlaybackStep('show-loading', function () {
+      // 恢复播放（旧链接失效后重新取链）必须给出可见的加载反馈；普通切歌保持
+      // 无缝封面过渡，不显示加载圈。
+      if (opts.resumeRecovery) showLoading({});
+      else showLoading({ trackSwitch: true, seamlessCover: true });
+    });
     if (!qualitySwitch) lyricSunEnergy = 0; lyricSunTarget = 0; lyricSunHold = 0; lyricSunAvg = 0; lyricSunPeak = 0.55;
 
     // 首次播放: 粒子从暗处浮出 (Apple 风格)

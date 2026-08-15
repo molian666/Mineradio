@@ -169,6 +169,7 @@ function makeHarness(options = {}) {
     'disconnectAudioGraphNodes',
     'replaceAudioElementForGraphRecovery',
     'resetPlaybackAudioGraphForSourceSwitch',
+    'createPlaybackAudioContext',
     'initAudio',
     'readPlaybackAnalyserSignal',
     'rebuildPlaybackGraphWithCapture',

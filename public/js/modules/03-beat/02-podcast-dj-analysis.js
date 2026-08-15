@@ -436,15 +436,14 @@ async function analyzePodcastDjBeats(audioUrl, token, durationSec) {
     if (token !== djBeatMapToken || !djMode.active) { hideBeatChip(); return null; }
 
     showBeatChip('DJ 解码音频…');
+    // 离线解码，避免蓝牙下每次分析创建/销毁真实输出流导致播放断续。
     var TmpCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-    var DecodeCtx = window.AudioContext || window.webkitAudioContext;
-    if (!DecodeCtx) { hideBeatChip(); return null; }
-    var dc = new DecodeCtx();
+    if (!TmpCtx) { hideBeatChip(); return null; }
+    var dc = new TmpCtx(1, 1, 44100);
     var buffer = await new Promise(function (resolve, reject) {
       dc.decodeAudioData(ab, resolve, reject);
     }).catch(function (e) { console.warn('podcast DJ decode failed:', e); return null; });
     ab = null;
-    dc.close && dc.close();
     if (!buffer || token !== djBeatMapToken || !djMode.active) { hideBeatChip(); return null; }
     return await buildPodcastDjLowOnlyBeatMap(buffer, token);
 

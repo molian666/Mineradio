@@ -513,6 +513,14 @@ const CHROMIUM_SAFE_PERFORMANCE_SWITCHES = [
   ['enable-accelerated-2d-canvas'],
   ['use-angle', 'd3d11'],
 ];
+// 蓝牙耳机（A2DP）对输出欠载极敏感：Chromium 在 Windows 上为蓝牙端点启用
+// "audio offload"，缓冲/码率切换时机不合适时会直接断续。请求一个与 offload
+// 预期不一致的输出缓冲（帧数）会让 Chromium 退回软件缓冲路径，配合
+// renderer 内 WebAudio 的大缓冲，可显著减少蓝牙断续。
+// 帧数可用 MINERADIO_AUDIO_BUFFER_SIZE 覆盖（默认 ~4096 帧 ≈ 85-93ms）。
+const CHROMIUM_SAFE_AUDIO_STABILITY_SWITCHES = [
+  ['audio-buffer-size', process.env.MINERADIO_AUDIO_BUFFER_SIZE || '4096'],
+];
 const CHROMIUM_OPT_IN_PERFORMANCE_SWITCHES = [
   ['ignore-gpu-blocklist', null, 'MINERADIO_IGNORE_GPU_BLOCKLIST'],
   ['force_high_performance_gpu', null, 'MINERADIO_FORCE_HIGH_PERFORMANCE_GPU'],
@@ -525,6 +533,7 @@ function appendChromiumSwitch(name, value) {
   else app.commandLine.appendSwitch(name, value);
 }
 for (const [name, value] of CHROMIUM_SAFE_PERFORMANCE_SWITCHES) appendChromiumSwitch(name, value);
+for (const [name, value] of CHROMIUM_SAFE_AUDIO_STABILITY_SWITCHES) appendChromiumSwitch(name, value);
 for (const [name, value, envName] of CHROMIUM_OPT_IN_PERFORMANCE_SWITCHES) {
   if (process.env[envName] === '1') appendChromiumSwitch(name, value);
 }
