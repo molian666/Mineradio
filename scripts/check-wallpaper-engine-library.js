@@ -21,6 +21,18 @@ function writeProject(root, name, manifest, files) {
   return dir;
 }
 
+// 库内部对项目文件使用 fs.promises.realpath() 校验，返回 Windows 长名路径；
+// 而 os.tmpdir() 在长用户名（如 GitHub runner 的 runneradmin）上可能返回
+// 8.3 短名（RUNNER~1）。比较路径前统一做 realpath，两边都收敛到长名，
+// 避免同一文件因短名/长名差异被误判为不同路径。
+function canonicalPath(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch (_) {
+    return path.resolve(p);
+  }
+}
+
 async function main() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'mineradio-we-'));
   const libraryRoot = path.join(temp, 'library');
@@ -126,8 +138,8 @@ async function main() {
     assert(!JSON.stringify(snapshot.projects).includes(temp), 'renderer metadata must not expose absolute paths');
     assert.strictEqual(snapshot.enginePlayableCount, 2, 'valid .pkg and PKGV .pak Scene packages should be engine playable');
     const sceneTarget = await instance.getNativeSceneTarget(scene.id);
-    assert.strictEqual(sceneTarget.scenePackage, path.join(libraryRoot, 'scene-project', 'scene.pkg'));
-    assert.strictEqual(sceneTarget.projectFile, path.join(libraryRoot, 'scene-project', 'project.json'));
+    assert.strictEqual(canonicalPath(sceneTarget.scenePackage), canonicalPath(path.join(libraryRoot, 'scene-project', 'scene.pkg')));
+    assert.strictEqual(canonicalPath(sceneTarget.projectFile), canonicalPath(path.join(libraryRoot, 'scene-project', 'project.json')));
     assert.deepStrictEqual(sceneTarget.muteProperties, {
       volume: 0,
       dbVolume: -60,
@@ -143,14 +155,14 @@ async function main() {
     assert.strictEqual(sceneDetails.properties.find((property) => property.key === 'music').autoMuted, true);
     assert(!JSON.stringify(sceneDetails).includes(temp), 'on-demand property details must not expose absolute paths');
     const pakTarget = await instance.getNativeSceneTarget(pakScene.id);
-    assert.strictEqual(pakTarget.scenePackage, path.join(libraryRoot, 'pak-project', 'scene.pak'));
-    assert.strictEqual(pakTarget.projectFile, path.join(libraryRoot, 'pak-project', 'project.json'));
+    assert.strictEqual(canonicalPath(pakTarget.scenePackage), canonicalPath(path.join(libraryRoot, 'pak-project', 'scene.pak')));
+    assert.strictEqual(canonicalPath(pakTarget.projectFile), canonicalPath(path.join(libraryRoot, 'pak-project', 'project.json')));
 
     snapshot = await instance.addManualProjectFile(path.join(customPakProject, 'custom-name.pak'));
     const customPakScene = snapshot.projects.find((item) => item.title === 'Custom PAK Scene Fixture');
     assert(customPakScene && customPakScene.enginePlayable, 'a selected custom-name PKGV .pak should become the project package override');
     const customPakTarget = await instance.getNativeSceneTarget(customPakScene.id);
-    assert.strictEqual(customPakTarget.scenePackage, path.join(customPakProject, 'custom-name.pak'));
+    assert.strictEqual(canonicalPath(customPakTarget.scenePackage), canonicalPath(path.join(customPakProject, 'custom-name.pak')));
     await assert.rejects(
       () => instance.addManualProjectFile(path.join(invalidPakProject, 'resources.pak')),
       /不是有效的 Wallpaper Engine PKGV 场景包/
