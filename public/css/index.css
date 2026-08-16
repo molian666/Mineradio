@@ -5111,6 +5111,12 @@ body.home-controls-locked #bottom-bar {
   box-shadow: 0 0 18px rgba(var(--fc-accent-rgb), .10), inset 0 1px 1px rgba(255, 255, 255, .18)
 }
 
+/* 悬停时长预览：与拖动同级的视觉反馈，但不动进度填充（填充=真实播放位置） */
+#progress-bar.progress-hovering {
+  height: 5px;
+  box-shadow: 0 0 22px rgba(var(--fc-accent-rgb), .16), inset 0 1px 1px rgba(255, 255, 255, .20)
+}
+
 #progress-fill {
   height: 100%;
   width: 0%;

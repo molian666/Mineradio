@@ -25,6 +25,9 @@ var progressDragState = {
   pendingPointer: null,
   pointerPreviewRaf: 0
 };
+// 悬停预览状态：鼠标悬停在进度条上（未按下）时，在 time-display 显示
+// 鼠标位置对应的时长，不改变进度条填充（填充仍表示真实播放位置）。
+var progressHoverState = { active: false, time: 0, duration: 0 };
 var progressLyricPreviewRaf = 0;
 function progressSeekPreviewVisualReady() {
   if (!lyricsLines || !lyricsLines.length || (fx && fx.particleLyrics === false)) return true;
@@ -161,6 +164,12 @@ function updatePlaybackProgressUi() {
   var currentSec = getPlaybackCurrentSeconds();
   if (durationSec > 0 && currentSec > durationSec) currentSec = durationSec;
   setProgressVisual(durationSec > 0 ? (currentSec / durationSec * 100) : 0);
+  // 悬停预览激活时保留鼠标位置的时长显示，不被播放进度覆盖；
+  // 进度条填充仍按真实播放进度更新。
+  if (progressHoverState.active && progressHoverState.duration > 0) {
+    if (durationSec > 0 && progressHoverState.time > durationSec) progressHoverState.time = durationSec;
+    return;
+  }
   var timeDisplay = document.getElementById('time-display');
   if (timeDisplay) timeDisplay.textContent = formatProgramTime(currentSec) + ' / ' + (durationSec > 0 ? formatProgramTime(durationSec) : '0:00');
 }
@@ -301,6 +310,43 @@ function previewProgressPointer(e, emitParticles) {
   if (emitParticles) emitProgressDragParticles(e.clientX, preview.rect.top + preview.rect.height / 2);
   return true;
 }
+// ============================================================
+//  进度条悬停时长预览：鼠标悬停（未按下）时在 time-display 显示
+//  鼠标位置对应的时长，离开后恢复真实播放进度。
+// ============================================================
+function progressHoverTimeFromEvent(e) {
+  var durationSec = getPlaybackDurationSeconds();
+  if (!(durationSec > 0)) return null;
+  var bar = document.getElementById('progress-bar');
+  if (!bar) return null;
+  var rect = bar.getBoundingClientRect();
+  var width = Math.max(1, rect.width || 1);
+  var ratio = clampRange((e.clientX - rect.left) / width, 0, 1);
+  return { time: ratio * durationSec, duration: durationSec };
+}
+function previewProgressHoverTime(e) {
+  if (!e || progressDragState.active) return false;
+  var hover = progressHoverTimeFromEvent(e);
+  if (!hover) return false;
+  progressHoverState.active = true;
+  progressHoverState.time = hover.time;
+  progressHoverState.duration = hover.duration;
+  var bar = document.getElementById('progress-bar');
+  if (bar) bar.classList.add('progress-hovering');
+  var timeDisplay = document.getElementById('time-display');
+  if (timeDisplay) {
+    timeDisplay.textContent = formatProgramTime(hover.time) + ' / ' + (hover.duration > 0 ? formatProgramTime(hover.duration) : '0:00');
+  }
+  return true;
+}
+function clearProgressHoverPreview() {
+  if (!progressHoverState.active) return;
+  progressHoverState.active = false;
+  var bar = document.getElementById('progress-bar');
+  if (bar) bar.classList.remove('progress-hovering');
+  // 恢复真实播放进度显示（若有进行中的拖动预览则交给拖动逻辑）
+  if (!progressDragState.active) updatePlaybackProgressUi();
+}
 function progressSeekTargetReached(media, targetTime, serial) {
   if (!media || serial !== progressDragState.commitSerial) return false;
   if (!progressSeekMediaStillCurrent(media, progressDragState.previewSettleMediaSrc)) return false;
@@ -433,7 +479,19 @@ function commitProgressSeek(targetTime, resumeAfterSeek) {
   });
 }
 var progressBar = document.getElementById('progress-bar');
+// 悬停时长预览（未按下）：显示鼠标位置对应的时长，不改变播放。
+progressBar.addEventListener('pointerenter', function (e) {
+  previewProgressHoverTime(e);
+});
+progressBar.addEventListener('pointermove', function (e) {
+  if (progressDragState.active) return;
+  previewProgressHoverTime(e);
+});
+progressBar.addEventListener('pointerleave', function () {
+  clearProgressHoverPreview();
+});
 progressBar.addEventListener('pointerdown', function (e) {
+  clearProgressHoverPreview();
   if (!audio || !getPlaybackDurationSeconds()) return;
   if (typeof resetCuefieldAutoMix === 'function') resetCuefieldAutoMix('manual-seek');
   if (
