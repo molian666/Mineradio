@@ -7290,7 +7290,9 @@ body.diy-mode #controls {
 /* ---------- 控制栏图标防重叠：中等/窄视口下左右簇不溢出到中轴 ----------
    三列网格在 620-1180px 区间时，左右簇内容比列宽还宽，且 .modes/.actions
    都是 overflow:visible，图标会直接压到中间的 transport 按钮上造成"排版错乱"。
-   这里按宽度分级隐藏次要按钮、收紧间距，保证中轴 transport 不被挤压。 */
+   这里按宽度分级隐藏次要按钮、收紧间距，保证中轴 transport 不被挤压。
+   注意：时长显示 #time-display 是播放器核心信息，不参与中等视口的隐藏
+   （默认 1152px 窗口不应丢失当前/总时长），只在更窄的断点降级。 */
 @media (max-width:1180px) {
 
   #controls,
@@ -7299,7 +7301,6 @@ body.diy-mode #controls {
     gap: clamp(8px, 1.2vw, 14px);
   }
 
-  #time-display,
   #cuefield-automix-btn {
     display: none !important
   }
