@@ -278,6 +278,19 @@ function checkIndexLoaderBundle() {
   const out = bundler.buildBundleIndexModuleText();
   new Function(out.text); // parse the bundle exactly as the renderer will receive it
   console.log(`[OK] Bundler produces parseable output (${out.moduleCount} modules, ${(out.byteLength / 1024).toFixed(1)} KB).`);
+  // 陈旧 bundle 守卫：若 public/js/index-bundle.js 已生成（本地开发/打包产物），
+  // 它必须与当前模块源码一致，否则 loader 会静默加载旧代码（曾导致 splash 修复
+  // 不生效、窗口黑屏）。bundle 缺失时跳过（开发期走逐模块路径）。
+  const bundlePath = path.join(appRoot, 'public', 'js', 'index-bundle.js');
+  if (fs.existsSync(bundlePath)) {
+    const existing = fs.readFileSync(bundlePath, 'utf8');
+    if (existing !== out.text) {
+      fail('public/js/index-bundle.js is STALE (modules changed after it was generated). Run `npm run bundle:index` and restart.');
+    }
+    console.log('[OK] index-bundle.js matches current module sources (fresh).');
+  } else {
+    console.log('[OK] index-bundle.js absent; dev loader uses parallel per-module fetch.');
+  }
   console.log('[OK] index-loader async bundle-first + parallel fallback present.');
 }
 
