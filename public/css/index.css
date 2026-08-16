@@ -13872,6 +13872,87 @@ body.desktop-shell.diy-mode #bottom-bar.stage-mode {
 }
 
 /* ============================================================ */
+/*  快捷键参考浮层（只读 / 可搜索，与热键设置互补）                  */
+/* ============================================================ */
+.shortcut-ref-modal {
+  z-index: 1460
+}
+
+.shortcut-ref-dialog {
+  width: min(680px, calc(100vw - 36px))
+}
+
+.shortcut-ref-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, .11);
+  background: rgba(0, 0, 0, .22);
+  color: #fff;
+  font: 600 12.5px/1 var(--font-sans);
+  padding: 0 11px;
+  outline: none
+}
+
+.shortcut-ref-search::placeholder {
+  color: rgba(255, 255, 255, .36)
+}
+
+.shortcut-ref-search:focus {
+  border-color: rgba(var(--fc-accent-rgb), .42);
+  box-shadow: 0 0 0 2px rgba(var(--fc-accent-rgb), .12)
+}
+
+.shortcut-ref-note {
+  display: flex;
+  gap: 18px;
+  flex: 0 0 auto
+}
+
+.shortcut-ref-col-head {
+  font-size: 10.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, .4)
+}
+
+.shortcut-ref-row {
+  grid-template-columns: minmax(120px, 1fr) 170px 170px;
+  gap: 14px
+}
+
+.shortcut-ref-row .shortcut-ref-key {
+  font: 760 11.5px/1 var(--font-sans);
+  color: rgba(255, 255, 255, .82);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis
+}
+
+.shortcut-ref-empty {
+  margin-top: 18px;
+  padding: 26px 14px;
+  text-align: center;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, .42);
+  border: 1px dashed rgba(255, 255, 255, .10);
+  border-radius: 12px
+}
+
+@media (max-width:720px) {
+  .shortcut-ref-row {
+    grid-template-columns: 1fr;
+    gap: 7px
+  }
+
+  .shortcut-ref-note {
+    width: 100%;
+    justify-content: space-between
+  }
+}
+
+/* ============================================================ */
 /*  歌单/队列面板                                                 */
 /* ============================================================ */
 #playlist-panel {

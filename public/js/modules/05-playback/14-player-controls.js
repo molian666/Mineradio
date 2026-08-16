@@ -581,7 +581,10 @@ async function attemptAudioPlay(opts) {
     playing = false; setPlayIcon(false);
     hideLoading();
     forcePlaybackControlsInteractive();
-    if (!opts.silent && !opts.trackSwitch) showToast(opts.manual ? '播放启动失败, 请重新选择歌曲' : '播放被系统拦截, 请点击播放按钮');
+    if (!opts.silent && !opts.trackSwitch) {
+      showToast(opts.manual ? '播放启动失败, 请重新选择歌曲' : '播放被系统拦截, 请点击播放按钮');
+      if (typeof showPlaybackProblemForError === 'function') showPlaybackProblemForError(err);
+    }
     return false;
   }
 }
@@ -644,6 +647,8 @@ function setPlayIcon(p) {
   document.getElementById('play-icon').innerHTML = p
     ? '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>'
     : '<path d="M8 5v14l11-7z"/>';
+  // 系统媒体会话（SMTC）状态收敛点：任何播放/暂停状态变化都从这里同步到 Windows 媒体键。
+  if (typeof setSystemMediaSessionPlaybackState === 'function') setSystemMediaSessionPlaybackState(!!p);
 }
 function shuffleArrayInPlace(items) {
   for (var i = items.length - 1; i > 0; i--) {

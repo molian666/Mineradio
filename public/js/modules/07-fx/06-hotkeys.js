@@ -62,6 +62,44 @@ function formatHotkey(hotkey) {
   if (!hotkey) return '未设置';
   return hotkey.split('+').map(hotkeyDisplayPart).join(' + ');
 }
+// 返回某个功能的快捷键提示片段（如 ' · 快捷键: Space'）。优先局内热键，
+// 局内未设置时回退到全局热键；都不存在则返回空字符串。供按钮悬停 tooltip 使用。
+function hotkeyButtonHint(actionKey) {
+  if (!hotkeySettings || !HOTKEY_ACTIONS) return '';
+  var localKey = hotkeySettings.local && String(hotkeySettings.local[actionKey] || '').trim();
+  var globalKey = hotkeySettings.global && String(hotkeySettings.global[actionKey] || '').trim();
+  var display = '';
+  if (localKey) display = formatHotkey(localKey);
+  else if (globalKey) display = formatHotkey(globalKey);
+  if (!display || display === '未设置') return '';
+  return ' · 快捷键: ' + display;
+}
+// 把带 base 标题（首次调用时抓取）的按钮 tooltip 刷新为「base标题 + 快捷键提示」。
+// 幂等：重复调用不会叠加。用于按钮 title 由 HTML 或模块一次性写死的场景。
+var HOTKEY_TITLE_BUTTON_MAP = [
+  { selector: '#prev-btn', action: 'prevTrack' },
+  { selector: '#play-btn', action: 'togglePlay' },
+  { selector: '#next-btn', action: 'nextTrack' },
+  { selector: '#volume-btn', action: 'volumeUp' },
+  { selector: '.fullscreen-toggle-btn', action: 'toggleFullscreen' }
+];
+function hotkeyButtonBaseTitle(btn) {
+  if (btn.__mineradioHotkeyBaseTitle == null) {
+    btn.__mineradioHotkeyBaseTitle = String(btn.title || '');
+  }
+  return btn.__mineradioHotkeyBaseTitle;
+}
+function applyHotkeyButtonHints() {
+  if (!hotkeySettings || typeof document === 'undefined') return;
+  HOTKEY_TITLE_BUTTON_MAP.forEach(function (item) {
+    var btn = document.querySelector(item.selector);
+    if (!btn) return;
+    var base = hotkeyButtonBaseTitle(btn);
+    var hint = hotkeyButtonHint(item.action);
+    btn.title = base + hint;
+  });
+}
+
 function hotkeyToAccelerator(hotkey) {
   var parts = String(hotkey || '').split('+').filter(Boolean);
   if (!parts.length) return '';
@@ -118,6 +156,9 @@ function executeHotkeyAction(actionKey, source) {
     }).catch(function () { });
   }
   if (actionKey === 'toggleDesktopLyrics') return toggleFx('desktopLyrics');
+  if (actionKey === 'toggleShortcutReference' && typeof toggleShortcutReference === 'function') {
+    return toggleShortcutReference();
+  }
 }
 function desktopInteractionHotkeyHint() {
   var binding = hotkeySettings && hotkeySettings.global && hotkeySettings.global.toggleDesktopInteraction;
@@ -278,6 +319,7 @@ function setHotkeyBinding(action, scope, value) {
   saveHotkeySettings();
   renderHotkeySettings();
   if (scope === 'global') registerGlobalHotkeys();
+  if (typeof applyHotkeyButtonHints === 'function') applyHotkeyButtonHints();
 }
 function resetHotkeyBinding(action, scope) {
   var meta = hotkeyActionMeta(action);
@@ -325,6 +367,10 @@ function bindHotkeySettings() {
       });
     }
   }
+  // 启动后为支持快捷键的核心控制按钮刷新悬停提示，并保持随用户改动同步。
+  if (typeof applyHotkeyButtonHints === 'function') applyHotkeyButtonHints();
+  // 新增「快捷键参考」面板按钮（独立模块，存在则接线，不破坏原有行为）。
+  if (typeof ensureShortcutReferenceButton === 'function') ensureShortcutReferenceButton();
   registerGlobalHotkeys();
 }
 document.addEventListener('keydown', function (e) {

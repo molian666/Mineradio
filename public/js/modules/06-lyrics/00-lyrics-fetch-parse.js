@@ -833,8 +833,11 @@ function updateDesktopLyricsBtnState() {
   var desktop = !!fx.desktopLyrics;
   btn.classList.toggle('active', desktop);
   btn.setAttribute('aria-pressed', desktop ? 'true' : 'false');
-  btn.title = desktop ? '桌面歌词已开启 · 点击关闭' : '桌面歌词已关闭 · 点击开启';
-  btn.setAttribute('aria-label', btn.title);
+  var title = desktop ? '桌面歌词已开启 · 点击关闭' : '桌面歌词已关闭 · 点击开启';
+  // 悬停提示追加快捷键说明（Alt+L，可在热键设置中改）。
+  if (typeof hotkeyButtonHint === 'function') title += hotkeyButtonHint('toggleDesktopLyrics');
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
 }
 
 function toggleDesktopLyricsFromPlayerBar() {

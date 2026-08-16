@@ -255,6 +255,33 @@ function parseCombinedIndexModules() {
   console.log(`[OK] Combined classic script parses. Modules: ${modulePaths.length}.`);
 }
 
+// C3 · index-loader 打包化守护：
+//  - loader 必须改为异步并行 XHR（不再同步阻塞），且保持 modulePaths 内联以便打包。
+//  - loader 必须优先尝试预打包单文件，缺失/无标记时回退到逐模块并行加载。
+//  - 打包器输出必须可解析（内存构建校验，不依赖已生成的 bundle 文件）。
+function checkIndexLoaderBundle() {
+  logStep('Index loader bundle (C3)');
+  const loaderPath = path.join(appRoot, 'public', 'js', 'index-loader.js');
+  const loader = fs.readFileSync(loaderPath, 'utf8');
+  if (/\bopen\([^)]*false\s*\)/.test(loader)) {
+    fail('index-loader.js still uses synchronous XHR (blocking load). Change to async parallel fetch.');
+  }
+  for (const marker of ['cacheBustPath', 'loadIndexModulesFromBundle', 'loadIndexModulesParallel', '#MINERADIO_INDEX_BUNDLE']) {
+    if (loader.indexOf(marker) < 0) fail(`index-loader.js missing expected C3 structure marker: ${marker}`);
+  }
+  let bundler = null;
+  try {
+    bundler = require('./bundle-index-modules.js');
+  } catch (e) {
+    fail('Cannot load scripts/bundle-index-modules.js: ' + (e && e.message ? e.message : e));
+  }
+  const out = bundler.buildBundleIndexModuleText();
+  new Function(out.text); // parse the bundle exactly as the renderer will receive it
+  console.log(`[OK] Bundler produces parseable output (${out.moduleCount} modules, ${(out.byteLength / 1024).toFixed(1)} KB).`);
+  console.log('[OK] index-loader async bundle-first + parallel fallback present.');
+}
+
+
 function scanForbiddenMarkers() {
   logStep('Forbidden FSR/DLSS/native FG scan');
   const scanTargets = [
@@ -5444,6 +5471,7 @@ async function main() {
   runPlatformAccountSyncGuardCheck();
   runHomeDailyRecommendationRegressionCheck();
   parseCombinedIndexModules();
+  checkIndexLoaderBundle();
   scanForbiddenMarkers();
   checkMainWindowChrome();
   checkBackgroundTransparencyControlsGuard();

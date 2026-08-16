@@ -234,7 +234,7 @@ async function refreshQQLoginStatus(options) {
     auditProviderVipState('qq', qqLoginStatus);
     if (!qqLoginStatus.loggedIn) {
       if (qqLoginStatus.sessionExpired) {
-        if (!qqSessionExpiredNotified) { qqSessionExpiredNotified = true; showToast('QQ 音乐登录已失效，请重新登录'); }
+        if (!qqSessionExpiredNotified) { qqSessionExpiredNotified = true; showToast('QQ 音乐登录已失效，请重新登录'); if (typeof showProblemCard === 'function') showProblemCard('login', { title: 'QQ 音乐登录已失效', body: '你的 QQ 音乐登录已失效，重新登录后即可继续播放与同步歌单。', login: true, source: 'qq' }); }
       } else if (prevLogged || qqLoginWasLoggedIn) showToast(qqLoginStatus.stale ? 'QQ 音乐登录已失效' : 'QQ 音乐已掉登录');
       qqPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qq'; });
@@ -374,7 +374,7 @@ async function refreshKugouLoginStatus() {
     auditProviderVipState('kugou', kugouLoginStatus);
     if (!kugouLoginStatus.loggedIn) {
       if (kugouLoginStatus.sessionExpired || kugouLoginStatus.reauthRequired) {
-        if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); }
+        if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); if (typeof showProblemCard === 'function') showProblemCard('login', { title: '酷狗音乐登录已失效', body: '你的酷狗音乐登录已失效，重新登录后即可继续播放与同步歌单。', login: true, source: 'kugou' }); }
       } else if (prevLogged || kugouLoginWasLoggedIn) showToast(kugouLoginStatus.stale ? '酷狗音乐登录已失效' : '酷狗音乐已掉登录');
       kugouPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'kugou'; });
@@ -424,7 +424,7 @@ function markKugouSessionExpired() {
   userPlaylists = userPlaylists.filter(function (pl) { return pl && pl.provider !== 'kugou'; });
   playlistCatalogRevision += 1;
   renderUserBtn();
-  if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); }
+  if (!kugouSessionExpiredNotified) { kugouSessionExpiredNotified = true; showToast('酷狗音乐登录已失效，请重新登录'); if (typeof showProblemCard === 'function') showProblemCard('login', { title: '酷狗音乐登录已失效', body: '酷狗同步已确认会话失效，请重新登录酷狗音乐账号以继续同步。', login: true, source: 'kugou' }); }
 }
 function startKugouLoginStatusAutoRefresh() {
   if (kugouLoginAutoRefreshTimer) clearInterval(kugouLoginAutoRefreshTimer);
@@ -484,7 +484,7 @@ async function refreshQishuiLoginStatus() {
     auditProviderVipState('qishui', qishuiLoginStatus);
     if (!qishuiLoginStatus.loggedIn) {
       if (qishuiLoginStatus.sessionExpired) {
-        if (!qishuiSessionExpiredNotified) { qishuiSessionExpiredNotified = true; showToast('汽水音乐登录已失效，请重新登录'); }
+        if (!qishuiSessionExpiredNotified) { qishuiSessionExpiredNotified = true; showToast('汽水音乐登录已失效，请重新登录'); if (typeof showProblemCard === 'function') showProblemCard('login', { title: '汽水音乐登录已失效', body: '你的汽水音乐登录已失效，重新扫码登录后即可继续播放与同步歌单。', login: true, source: 'qishui' }); }
       } else if (prevLogged || qishuiLoginWasLoggedIn) showToast('汽水音乐授权已清除');
       qishuiPlaylists = [];
       userPlaylists = userPlaylists.filter(function (pl) { return pl.provider !== 'qishui'; });

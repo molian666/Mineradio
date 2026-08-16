@@ -1,7 +1,16 @@
 'use strict';
 
+// C3 · index-loader 打包化（ROADMAP 第 3~4 周）
+//  - 生产期：优先一次请求加载预打包的 js/index-bundle.js（build 时由
+//    scripts/bundle-index-modules.js 生成）。
+//  - 开发期：并行 XHR 逐模块拉取，仍按 modulePaths 顺序拼接后一次性求值，
+//    保证模块全局初始化顺序不变（对比旧版串行同步 XHR 不再阻塞主线程）。
+//  - 可通过 window.__MINERADIO_FORCE_MODULE_FETCH__ = true（在 index.html 的
+//    loader 之前）强制走逐模块路径，便于开发 / 调试。
+
 (function loadMineradioIndexModules() {
   const moduleCacheBust = String(Date.now());
+  const forcePerModuleFetch = !!(typeof window !== 'undefined' && window.__MINERADIO_FORCE_MODULE_FETCH__);
   const modulePaths = [
     'js/modules/00-state/00-core-stores.js',
     'js/modules/00-state/01-perf-render-state.js',
@@ -15,6 +24,7 @@
     'js/modules/00-state/09-performance-probe.js',
     'js/modules/00-state/10-frame-scheduler.js',
     'js/modules/00-state/11-system-memory-controls.js',
+    'js/modules/00-state/12-system-media-session.js',
     'js/modules/01-scene/00-renderer-quality.js',
     'js/modules/01-scene/01-orbit-free-camera.js',
     'js/modules/01-scene/02-beat-camera-runtime.js',
@@ -73,6 +83,7 @@
     'js/modules/05-playback/17-cuefield-timeline-executor.js',
     'js/modules/05-playback/18-cuefield-automix-integration.js',
     'js/modules/05-playback/19-song-download.js',
+    'js/modules/05-playback/20-problem-state-unified.js',
     'js/modules/06-lyrics/00-lyrics-fetch-parse.js',
     'js/modules/06-lyrics/01-playlist-panel-shell.js',
     'js/modules/06-lyrics/01a-merged-playlist.js',
@@ -89,6 +100,7 @@
     'js/modules/07-fx/04-preset-grid-uniforms.js',
     'js/modules/07-fx/05-fx-panel-performance.js',
     'js/modules/07-fx/06-hotkeys.js',
+    'js/modules/07-fx/10-shortcut-reference.js',
     'js/modules/07-fx/07-bindings-shelf-immersive.js',
     'js/modules/07-fx/08-cache-storage-settings.js',
     'js/modules/07-fx/09-download-settings.js',
@@ -111,19 +123,61 @@
     'js/modules/11-main-loop.js',
   ];
 
-  function readModule(path) {
-    const request = new XMLHttpRequest();
-    request.open('GET', path + (path.indexOf('?') >= 0 ? '&' : '?') + 'v=' + moduleCacheBust, false);
-    request.send(null);
-
-    if ((request.status < 200 || request.status >= 300) && request.status !== 0) {
-      throw new Error('Failed to load Mineradio module: ' + path + ' (' + request.status + ')');
-    }
-
-    return request.responseText;
+  function cacheBustPath(path) {
+    return path + (path.indexOf('?') >= 0 ? '&' : '?') + 'v=' + moduleCacheBust;
   }
 
-  const script = document.createElement('script');
-  script.text = modulePaths.map(readModule).join('') + '\n//# sourceURL=mineradio-index-modules.js\n';
-  document.currentScript.parentNode.insertBefore(script, document.currentScript.nextSibling);
+  // 异步 GET；resolve 响应文本，请求失败 reject。
+  function httpGet(path) {
+    return new Promise(function (resolve, reject) {
+      const request = new XMLHttpRequest();
+      request.open('GET', path, true);
+      request.onload = function () {
+        if (request.status >= 200 && request.status < 300) resolve(request.responseText);
+        else reject(new Error('Failed to load Mineradio module: ' + path + ' (' + request.status + ')'));
+      };
+      request.onerror = function () {
+        reject(new Error('Network error loading: ' + path));
+      };
+      request.send(null);
+    });
+  }
+
+  function evalModuleScript(text, sourceUrl) {
+    const script = document.createElement('script');
+    script.text = text + '\n//# sourceURL=' + sourceUrl + '\n';
+    const mount = (document.head && document.head.parentNode) ? document.head : document.body;
+    if (mount) mount.appendChild(script);
+    else if (typeof console !== 'undefined') console.error('[IndexLoader] no mount node for module script');
+  }
+
+  // 预打包单文件路径：存在且带 bundle 标记才采用（一次请求）。
+  function loadIndexModulesFromBundle() {
+    if (forcePerModuleFetch) return Promise.reject(new Error('forced per-module fetch'));
+    const bundlePath = cacheBustPath('js/index-bundle.js');
+    return httpGet(bundlePath).then(function (text) {
+      if (!/\/\*#MINERADIO_INDEX_BUNDLE\*\//.test(text)) {
+        throw new Error('index-bundle.js present but missing bundle marker');
+      }
+      evalModuleScript(text, 'mineradio-index-bundle.js');
+      return true;
+    });
+  }
+
+  // 逐模块并行拉取，按 modulePaths 顺序拼接后一次性求值。
+  function loadIndexModulesParallel() {
+    const fetches = modulePaths.map(function (path) {
+      return httpGet(cacheBustPath(path));
+    });
+    return Promise.all(fetches).then(function (texts) {
+      evalModuleScript(texts.join(''), 'mineradio-index-modules.js');
+      return true;
+    });
+  }
+
+  loadIndexModulesFromBundle()
+    .catch(function () { return loadIndexModulesParallel(); })
+    .catch(function (err) {
+      if (typeof console !== 'undefined') console.error('[IndexLoader] failed to start Mineradio:', err && (err.message || err));
+    });
 })();

@@ -54,7 +54,29 @@ function playbackFailureNoticeFromError(err) {
   return playbackRestrictionNotice(song, { reason: category, message: msg });
 }
 
+var problemCardDispatchInFlight = false;
+function dispatchPlaybackProblemCard(err) {
+  // 统一问题出口接线：对登录/版权/网络三类可操作问题，在仍保留 toast 的同时
+  // 追加重试/去登录/去搜索按钮卡片。用 in-flight 标志避免 showPlaybackProblemForError
+  // 内部回调用 playbackFailureToastText 时重新派发导致的无限递归。
+  if (problemCardDispatchInFlight) return;
+  if (typeof showPlaybackProblemForError !== 'function') return;
+  var msg = String(err && err.message ? err.message : (err || '')).trim();
+  var lower = msg.toLowerCase();
+  if (!(/401|403|login_required|auth|cookie|credential|unauthorized|forbidden/.test(lower)
+    || /copyright|not playable|unavailable/.test(lower)
+    || /network|failed to fetch|timeout|econnreset|etimedout|err_connection|http 5|502|503|504/.test(lower))) return;
+  problemCardDispatchInFlight = true;
+  try {
+    showPlaybackProblemForError(err);
+  } catch (e) {
+    if (typeof console !== 'undefined' && console.warn) console.warn('[ProblemCard] dispatch failed:', e);
+  } finally {
+    problemCardDispatchInFlight = false;
+  }
+}
 function playbackFailureToastText(err) {
+  dispatchPlaybackProblemCard(err);
   var contextualNotice = playbackFailureNoticeFromError(err);
   if (contextualNotice) return contextualNotice.title + '：' + contextualNotice.body;
   if (isPlaybackRecursionError(err)) return '播放准备异常，已保持播放器可操作';

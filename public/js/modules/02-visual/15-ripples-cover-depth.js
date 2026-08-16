@@ -554,6 +554,8 @@ function updateControlTrackInfo(song) {
   if (artist) artist.textContent = song.artist || '';
   updatePlaybackQualityUi();
   if (typeof updateLyricTimingOffsetUi === 'function') updateLyricTimingOffsetUi(song);
+  // 系统媒体会话（SMTC）元数据收敛点：任何切歌 / 恢复当前曲目的这里都会刷新系统封面与控制信息。
+  if (typeof syncSystemMediaSessionNow === 'function') syncSystemMediaSessionNow('track-info');
 }
 
 function applyCoverCanvas(cv, thumbSrc, opts) {
