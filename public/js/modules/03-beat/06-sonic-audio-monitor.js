@@ -732,5 +732,7 @@ if (typeof window !== 'undefined') {
   window.getSonicAudioMonitorSnapshot = getSonicAudioMonitorSnapshot;
   window.toggleSonicAudioMonitorPanel = toggleSonicAudioMonitorPanel;
   window.refreshSonicAudioMonitorUi = refreshSonicAudioMonitorUi;
-  document.addEventListener('DOMContentLoaded', bindSonicAudioMonitorControls);
+  // C3 异步加载兼容：模块可能在 DOMContentLoaded 之后才被求值。
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindSonicAudioMonitorControls);
+  else bindSonicAudioMonitorControls();
 }

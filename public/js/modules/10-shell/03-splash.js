@@ -652,7 +652,7 @@ function markSplashReadyToEnter() {
   s.setAttribute('aria-label', '点击进入 Mineradio');
 }
 
-document.addEventListener('DOMContentLoaded', function () {
+function initSplashDomReady() {
   var s = document.getElementById('splash');
   if (!s) return;
   markAppPerf('dom-content-loaded');
@@ -681,4 +681,12 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   playMineradioIntroSound();
   splashTimer = setTimeout(markSplashReadyToEnter, 1500);
-});
+}
+
+// C3 异步加载兼容：模块可能在 DOMContentLoaded 之后才被求值，
+// 此时直接执行而不是注册永远不会触发的事件监听。
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initSplashDomReady);
+} else {
+  initSplashDomReady();
+}
