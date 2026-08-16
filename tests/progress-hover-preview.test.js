@@ -90,40 +90,43 @@ function createSandbox() {
   sandbox.updateCalls = 0;
   vm.createContext(sandbox);
   vm.runInContext(seekSource, sandbox, { filename: '04-progress-seek.js' });
+  // 初始化 time-display 为当前播放位置（30s / 200s），模拟已渲染状态
+  sandbox.updatePlaybackProgressUi();
   return sandbox;
 }
 
-test('hover preview shows mouse-position time in time-display without touching fill', () => {
+test('hover preview shows mouse-position time in tooltip without touching fill', () => {
   const sandbox = createSandbox();
+  // time-display 已初始化为当前播放位置（30s / 200s）
+  assert.equal(sandbox.timeDisplay.textContent, '0:30 / 3:20');
   // 鼠标在进度条 50% 处（clientX = 100 + 100 = 200）→ 时间应为 100s（1:40）
   const ok = sandbox.previewProgressHoverTime({ clientX: 200 });
   assert.equal(ok, true);
   assert.equal(sandbox.progressHoverState.active, true);
-  assert.equal(sandbox.timeDisplay.textContent, '1:40 / 3:20');
+  assert.equal(sandbox.tooltip.textContent, '1:40');
   assert.equal(sandbox.progressBar.classList.contains('progress-hovering'), true);
-  // 进度条填充不应被 hover 修改（updatePlaybackProgressUi 在 hover 时跳过文本覆盖）
-  sandbox.updatePlaybackProgressUi();
-  assert.equal(sandbox.timeDisplay.textContent, '1:40 / 3:20', 'hover preview must not be overwritten by playback progress');
+  // time-display 保持当前播放位置（30s / 200s）
+  assert.equal(sandbox.timeDisplay.textContent, '0:30 / 3:20');
 });
 
 test('hover preview clamps to bar bounds', () => {
   const sandbox = createSandbox();
   // clientX 超出进度条右侧 → 钳制到 100%
   sandbox.previewProgressHoverTime({ clientX: 9999 });
-  assert.equal(sandbox.timeDisplay.textContent, '3:20 / 3:20');
+  assert.equal(sandbox.tooltip.textContent, '3:20');
   // clientX 在进度条左侧 → 钳制到 0
   sandbox.previewProgressHoverTime({ clientX: 0 });
-  assert.equal(sandbox.timeDisplay.textContent, '0:00 / 3:20');
+  assert.equal(sandbox.tooltip.textContent, '0:00');
 });
 
-test('clearProgressHoverPreview restores real playback time and removes class', () => {
+test('clearProgressHoverPreview removes class and hover state', () => {
   const sandbox = createSandbox();
   sandbox.previewProgressHoverTime({ clientX: 200 });
-  assert.equal(sandbox.timeDisplay.textContent, '1:40 / 3:20');
+  assert.equal(sandbox.tooltip.textContent, '1:40');
   sandbox.clearProgressHoverPreview();
   assert.equal(sandbox.progressHoverState.active, false);
   assert.equal(sandbox.progressBar.classList.contains('progress-hovering'), false);
-  // 清除后 updatePlaybackProgressUi 恢复真实播放进度（30s / 200s）
+  // time-display 始终由 updatePlaybackProgressUi 驱动为当前播放位置
   sandbox.updatePlaybackProgressUi();
   assert.equal(sandbox.timeDisplay.textContent, '0:30 / 3:20');
 });
@@ -149,24 +152,29 @@ test('progress bar binds hover enter/move/leave handlers', () => {
   assert.match(seekSource, /addEventListener\('pointerleave'/);
 });
 
-test('hover preview functions exist and updatePlaybackProgressUi preserves hover text', () => {
+test('hover preview functions exist and only drive the tooltip', () => {
   assert.match(seekSource, /function previewProgressHoverTime\s*\(/);
   assert.match(seekSource, /function clearProgressHoverPreview\s*\(/);
   assert.match(seekSource, /function progressHoverTimeFromEvent\s*\(/);
-  assert.match(seekSource, /progressHoverState\.active[\s\S]{0,120}return;/);
+  // 悬停只驱动 tooltip（progress-tooltip），time-display 不再被悬停改写
+  assert.match(seekSource, /progressHoverState\.active = true;[\s\S]{0,400}progress-tooltip/);
+  assert.match(seekSource, /time-display 始终保持「当前播放位置 \/ 总时长」/);
 });
 
-test('hover preview updates the mouse-following tooltip with position time', () => {
+test('hover preview updates the mouse-following tooltip without touching time-display', () => {
   const sandbox = createSandbox();
   // 鼠标在进度条 25% 处（clientX = 100 + 50 = 150）→ 50s（0:50），--tip-x = 25%
   const ok = sandbox.previewProgressHoverTime({ clientX: 150 });
   assert.equal(ok, true);
   assert.equal(sandbox.tooltip.textContent, '0:50');
   assert.equal(sandbox.tooltip.styleProps['--tip-x'], '25%');
+  // time-display 保持当前播放位置（30s / 200s），不受悬停影响
+  assert.equal(sandbox.timeDisplay.textContent, '0:30 / 3:20');
   // 50% 处 → 100s（1:40），--tip-x = 50%
   sandbox.previewProgressHoverTime({ clientX: 200 });
   assert.equal(sandbox.tooltip.textContent, '1:40');
   assert.equal(sandbox.tooltip.styleProps['--tip-x'], '50%');
+  assert.equal(sandbox.timeDisplay.textContent, '0:30 / 3:20', 'time-display must stay at current position');
 });
 
 test('progress bar HTML contains the tooltip element', () => {

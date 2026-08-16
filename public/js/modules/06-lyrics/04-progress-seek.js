@@ -164,12 +164,8 @@ function updatePlaybackProgressUi() {
   var currentSec = getPlaybackCurrentSeconds();
   if (durationSec > 0 && currentSec > durationSec) currentSec = durationSec;
   setProgressVisual(durationSec > 0 ? (currentSec / durationSec * 100) : 0);
-  // 悬停预览激活时保留鼠标位置的时长显示，不被播放进度覆盖；
-  // 进度条填充仍按真实播放进度更新。
-  if (progressHoverState.active && progressHoverState.duration > 0) {
-    if (durationSec > 0 && progressHoverState.time > durationSec) progressHoverState.time = durationSec;
-    return;
-  }
+  // time-display 始终表示「当前播放位置 / 总时长」；悬停时长只显示在
+  // 跟随鼠标的 tooltip（#progress-tooltip）里，不影响这里。
   var timeDisplay = document.getElementById('time-display');
   if (timeDisplay) timeDisplay.textContent = formatProgramTime(currentSec) + ' / ' + (durationSec > 0 ? formatProgramTime(durationSec) : '0:00');
 }
@@ -335,6 +331,7 @@ function previewProgressHoverTime(e) {
   if (bar) {
     bar.classList.add('progress-hovering');
     // 跟随鼠标的 tooltip：位置用进度条内百分比（--tip-x），内容为鼠标位置时长。
+    // 注意：time-display 始终保持「当前播放位置 / 总时长」，不受悬停影响。
     var tip = document.getElementById('progress-tooltip');
     if (tip) {
       tip.textContent = formatProgramTime(hover.time);
@@ -344,10 +341,6 @@ function previewProgressHoverTime(e) {
       tip.style.setProperty('--tip-x', pct + '%');
     }
   }
-  var timeDisplay = document.getElementById('time-display');
-  if (timeDisplay) {
-    timeDisplay.textContent = formatProgramTime(hover.time) + ' / ' + (hover.duration > 0 ? formatProgramTime(hover.duration) : '0:00');
-  }
   return true;
 }
 function clearProgressHoverPreview() {
@@ -355,8 +348,6 @@ function clearProgressHoverPreview() {
   progressHoverState.active = false;
   var bar = document.getElementById('progress-bar');
   if (bar) bar.classList.remove('progress-hovering');
-  // 恢复真实播放进度显示（若有进行中的拖动预览则交给拖动逻辑）
-  if (!progressDragState.active) updatePlaybackProgressUi();
 }
 function progressSeekTargetReached(media, targetTime, serial) {
   if (!media || serial !== progressDragState.commitSerial) return false;
