@@ -1,6 +1,6 @@
 # Mineradio 产品规划与体验分析
 
-> 日期：2026-08 ｜ 版本基线：v2.3.1 ｜ 基于对当前代码库（desktop/、server.js、public/js/modules/、tests/、docs/）的盘点
+> 日期：2026-08 ｜ 版本基线：v2.3.2 ｜ 基于对当前代码库（desktop/、server.js、public/js/modules/、tests/、docs/）的盘点
 >
 > 本文回答三个问题：**接下来完善哪里、朝哪个方向发展、怎么提升用户体验**，并按优先级给出可执行路线。
 
