@@ -34,6 +34,15 @@ function createBarMock(width, left) {
 
 function createSandbox() {
   const timeDisplay = { textContent: '' };
+  const tooltip = {
+    textContent: '',
+    styleProps: {},
+    style: {
+      setProperty(name, value) {
+        tooltip.styleProps[name] = String(value);
+      }
+    }
+  };
   const progressBar = createBarMock(200, 100);
   const sandbox = {
     console,
@@ -43,6 +52,7 @@ function createSandbox() {
       getElementById(id) {
         if (id === 'progress-bar') return progressBar;
         if (id === 'time-display') return timeDisplay;
+        if (id === 'progress-tooltip') return tooltip;
         return null;
       }
     },
@@ -76,6 +86,7 @@ function createSandbox() {
   };
   sandbox.progressBar = progressBar;
   sandbox.timeDisplay = timeDisplay;
+  sandbox.tooltip = tooltip;
   sandbox.updateCalls = 0;
   vm.createContext(sandbox);
   vm.runInContext(seekSource, sandbox, { filename: '04-progress-seek.js' });
@@ -143,6 +154,32 @@ test('hover preview functions exist and updatePlaybackProgressUi preserves hover
   assert.match(seekSource, /function clearProgressHoverPreview\s*\(/);
   assert.match(seekSource, /function progressHoverTimeFromEvent\s*\(/);
   assert.match(seekSource, /progressHoverState\.active[\s\S]{0,120}return;/);
+});
+
+test('hover preview updates the mouse-following tooltip with position time', () => {
+  const sandbox = createSandbox();
+  // 鼠标在进度条 25% 处（clientX = 100 + 50 = 150）→ 50s（0:50），--tip-x = 25%
+  const ok = sandbox.previewProgressHoverTime({ clientX: 150 });
+  assert.equal(ok, true);
+  assert.equal(sandbox.tooltip.textContent, '0:50');
+  assert.equal(sandbox.tooltip.styleProps['--tip-x'], '25%');
+  // 50% 处 → 100s（1:40），--tip-x = 50%
+  sandbox.previewProgressHoverTime({ clientX: 200 });
+  assert.equal(sandbox.tooltip.textContent, '1:40');
+  assert.equal(sandbox.tooltip.styleProps['--tip-x'], '50%');
+});
+
+test('progress bar HTML contains the tooltip element', () => {
+  const htmlPath = path.join(appRoot, 'public', 'index.html');
+  const htmlSource = fs.readFileSync(htmlPath, 'utf8');
+  assert.match(htmlSource, /<div id="progress-tooltip" class="progress-tooltip"/);
+  assert.match(htmlSource, /id="progress-bar"[\s\S]*?id="progress-tooltip"/);
+});
+
+test('CSS styles the tooltip and shows it while progress-hovering', () => {
+  assert.match(cssSource, /#progress-tooltip \{/);
+  assert.match(cssSource, /--tip-x/);
+  assert.match(cssSource, /#progress-bar\.progress-hovering #progress-tooltip \{[\s\S]*?opacity: 1/);
 });
 
 test('CSS adds a progress-hovering visual state', () => {

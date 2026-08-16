@@ -5117,6 +5117,33 @@ body.home-controls-locked #bottom-bar {
   box-shadow: 0 0 22px rgba(var(--fc-accent-rgb), .16), inset 0 1px 1px rgba(255, 255, 255, .20)
 }
 
+/* 跟随鼠标的时长 tooltip：绝对定位于进度条上方，left 由 JS 通过 --tip-x 更新 */
+#progress-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: clamp(24px, var(--tip-x, 50%), calc(100% - 24px));
+  transform: translateX(-50%) translateY(4px);
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: rgba(8, 12, 16, .88);
+  border: 1px solid rgba(255, 255, 255, .16);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .42);
+  color: rgba(255, 255, 255, .92);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .3px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .14s ease, transform .14s ease;
+  z-index: 40
+}
+
+#progress-bar.progress-hovering #progress-tooltip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0)
+}
+
 #progress-fill {
   height: 100%;
   width: 0%;

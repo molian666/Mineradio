@@ -332,7 +332,18 @@ function previewProgressHoverTime(e) {
   progressHoverState.time = hover.time;
   progressHoverState.duration = hover.duration;
   var bar = document.getElementById('progress-bar');
-  if (bar) bar.classList.add('progress-hovering');
+  if (bar) {
+    bar.classList.add('progress-hovering');
+    // 跟随鼠标的 tooltip：位置用进度条内百分比（--tip-x），内容为鼠标位置时长。
+    var tip = document.getElementById('progress-tooltip');
+    if (tip) {
+      tip.textContent = formatProgramTime(hover.time);
+      var rect = bar.getBoundingClientRect();
+      var width = Math.max(1, rect.width || 1);
+      var pct = clampRange(((e.clientX - rect.left) / width) * 100, 0, 100);
+      tip.style.setProperty('--tip-x', pct + '%');
+    }
+  }
   var timeDisplay = document.getElementById('time-display');
   if (timeDisplay) {
     timeDisplay.textContent = formatProgramTime(hover.time) + ' / ' + (hover.duration > 0 ? formatProgramTime(hover.duration) : '0:00');
